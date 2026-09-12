@@ -1,0 +1,6 @@
+/.worktrees/
+/build/
+/dist/
+/ui/.build/
+/ui/.swiftpm/
+.DS_Store

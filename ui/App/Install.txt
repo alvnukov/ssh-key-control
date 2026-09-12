@@ -1,0 +1,47 @@
+SSH Key Control — Установка
+
+1. Перетащите SSH Key Control.app в папку Applications (Программы).
+2. Извлеките образ диска и откройте приложение из Программ.
+3. В меню значка выберите «Настроить SSH-агент…», затем «Подключить / обновить агент».
+
+Интерфейс выбирает язык macOS: доступны русский и английский.
+После обновления приложения снова нажмите «Подключить / обновить агент».
+Агент перезапустится: загруженные ключи и временные разрешения будут очищены.
+Не перемещайте приложение, пока агент подключён.
+
+Перед удалением выключите «Отключить штатный SSH-агент» в дополнительных
+настройках. Если требуется, завершите сеанс macOS, войдите снова и проверьте
+состояние. Затем выберите «Настроить SSH-агент…» → «Удалить настройки агента…»,
+отключите открытие при входе, закройте приложение и переместите его в Корзину.
+Записи Связки ключей и история сохраняются.
+
+Локальная сборка подписана для разработки. Для публичного распространения
+нужны подпись Developer ID и нотариальная проверка Apple.
+
+SSH Key Control — Installation
+
+1. Drag SSH Key Control.app onto Applications.
+2. Eject this disk image.
+3. Open SSH Key Control from Applications.
+4. Choose Set Up SSH Agent… from its menu bar icon, then Enable / Update Agent.
+
+Setup runs for your user without administrator access. It backs up existing
+SSH settings, configures confirmation and starts the bundled SSH agent and menu
+bar app under launchd supervision. A crash restarts either process with
+throttling. Quit deliberately stops the icon until the next login or setup
+update, while the SSH agent remains running.
+Replacing an existing agent clears its in-memory keys and temporary approvals.
+SSH can load keys again; keys added only through ssh-add must be added again.
+
+After replacing the app with a newer version, run Enable / Update Agent again.
+Keep the app at the same location while the agent is enabled.
+
+To uninstall: first turn OFF Disable Apple's SSH agent in Settings > Advanced.
+If prompted, save your work and log out of macOS, then sign in and check its
+status. Then choose Set Up SSH Agent… > Remove Agent Setup and move the app to
+the Trash. Removing the setup
+restores the system agent and removes only this app's managed SSH settings.
+Saved Keychain entries and security history are preserved.
+
+Local development builds are ad-hoc signed. Public downloads require
+Developer ID signing and Apple notarization.

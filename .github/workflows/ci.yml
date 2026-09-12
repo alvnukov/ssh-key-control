@@ -1,0 +1,200 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 6 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  security:
+    name: Source security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Install pinned analyzers
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - name: Scan full Git history for secrets
+        run: gitleaks git --redact --no-banner --log-opts="--all"
+      - name: Verify modules and workflow safety
+        run: |
+          go mod verify
+          go mod tidy -diff
+          actionlint
+          node --test scripts/check-sarif.test.mjs
+      - name: Static analysis and reachable vulnerabilities
+        run: |
+          make check
+          staticcheck ./...
+          govulncheck ./...
+      - name: Go race and SSH integration tests
+        run: |
+          test -x /usr/bin/ssh
+          test -x /usr/bin/ssh-agent
+          go test -race -count=1 ./...
+      - name: Fuzz packet and binding parsers
+        run: |
+          go test ./internal/agent -run='^$' -fuzz='^FuzzAgentPacketParsing$' -fuzztime=30s -parallel=2
+          go test ./internal/agent -run='^$' -fuzz='^FuzzSessionBindingParsing$' -fuzztime=30s -parallel=2
+
+  macos:
+    name: macOS (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Verify architecture and release version
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+          version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' ui/App/Info.plist)
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            test "$GITHUB_REF_NAME" = "v$version"
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Native static analysis and vulnerability scan
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          make check
+          staticcheck ./...
+          govulncheck ./...
+          xcrun clang --analyze -Werror -I ui/Sources/SSHKeyControlUIObjC/include ui/Sources/SSHKeyControlUIObjC/SSHKeyControlUIObjC.m -o /dev/null
+      - name: Native Go and Swift security regression tests
+        run: |
+          test -x /usr/bin/ssh
+          test -x /usr/bin/ssh-agent
+          go test -race -count=1 ./...
+          swift test --package-path ui -Xswiftc -warnings-as-errors
+      - name: Build and verify installed disk image
+        run: |
+          make dmg VERSION="$VERSION"
+          bash scripts/verify-dmg.sh "build/SSH-Key-Control-$(uname -m).dmg" "$VERSION"
+          govulncheck -mode=binary "build/SSH Key Control.app/Contents/MacOS/ssh-key-control"
+          go version -m "build/SSH Key Control.app/Contents/MacOS/ssh-key-control" > "build/build-info-$(uname -m).txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dmg-${{ matrix.arch }}
+          path: |
+            build/SSH-Key-Control-${{ matrix.arch }}.dmg
+            build/SSH-Key-Control-${{ matrix.arch }}.dmg.sha256
+            build/build-info-${{ matrix.arch }}.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  codeql:
+    name: CodeQL Go and Swift
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+      - uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
+        with:
+          languages: go,swift
+          build-mode: manual
+          queries: security-extended
+      - name: Trace both native languages
+        run: make app
+      - uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
+        with:
+          output: codeql-results
+          upload: always
+      - name: Block on CodeQL findings
+        run: node scripts/check-sarif.mjs codeql-results
+
+  release:
+    name: Publish verified tag
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [security, macos, codeql]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require a version tag on main
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git merge-base --is-ancestor HEAD origin/main
+          test -f "docs/releases/$GITHUB_REF_NAME.md"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dmg-*
+          path: release
+          merge-multiple: true
+      - name: Verify both artifacts before publication
+        run: |
+          cd release
+          test -f SSH-Key-Control-arm64.dmg
+          test -f SSH-Key-Control-x86_64.dmg
+          sha256sum -c SSH-Key-Control-arm64.dmg.sha256
+          sha256sum -c SSH-Key-Control-x86_64.dmg.sha256
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: 'release/*.dmg'
+      - name: Publish release from the verified tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --verify-tag --title "SSH Key Control $GITHUB_REF_NAME" \
+            --notes-file "docs/releases/$GITHUB_REF_NAME.md"
