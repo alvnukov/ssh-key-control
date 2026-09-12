@@ -29,11 +29,17 @@ struct SecurityEvent: Decodable, Identifiable, Sendable {
         case "approved": L10n.string("Approved")
         case "denied": L10n.string("Denied")
         case "cancelled": L10n.string("Cancelled")
+        case "revoked": L10n.string("Temporary decision revoked")
+        case "updated": L10n.string("Temporary decision duration changed")
         case "started": L10n.string("Agent started")
+        case "native_removed": L10n.string("Key removed from system agent")
+        case "native_remove_failed": L10n.string("System agent key removal failed")
+        case "native_unavailable": L10n.string("System agent monitoring failed")
         default: L10n.string("Error")
         }
     }
     var destination: String {
+        if kind == "native_agent" { return L10n.string("System SSH agent") }
         if kind == "agent" { return L10n.string("SSH Key Control agent") }
         if !isVerified { return L10n.string("Unverified destination") }
         return "\(user ?? "") · \((hostFingerprint ?? "").prefix(22))…"

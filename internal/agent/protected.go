@@ -21,8 +21,9 @@ type SigningRequest struct {
 // Protected owns an in-memory keyring with no ungated signing interface.
 // All connections share keys, lifetimes and lock state, but not destinations.
 type Protected struct {
-	keyring sshagent.ExtendedAgent
-	confirm func(context.Context, SigningRequest) (bool, error)
+	keyring        sshagent.ExtendedAgent
+	confirm        func(context.Context, SigningRequest) (bool, error)
+	openManagement func() error
 }
 
 // NewProtected creates an agent that requires confirm for every signature.
@@ -32,6 +33,16 @@ type Protected struct {
 // different connections and should honor its context.
 func NewProtected(confirm func(context.Context, SigningRequest) (bool, error)) *Protected {
 	return &Protected{keyring: sshagent.NewKeyring().(sshagent.ExtendedAgent), confirm: confirm}
+}
+
+// ManageDecisionsExtension only opens a local UI. No authority-changing data
+// or snapshots are accepted or returned on the agent socket.
+const ManageDecisionsExtension = "manage-decisions@ssh-key-control"
+
+func NewProtectedWithManagement(confirm func(context.Context, SigningRequest) (bool, error), open func() error) *Protected {
+	p := NewProtected(confirm)
+	p.openManagement = open
+	return p
 }
 
 // Serve serves one connection until disconnection or cancellation, closing conn
@@ -46,16 +57,19 @@ func (p *Protected) Serve(ctx context.Context, conn net.Conn) error {
 	done := make(chan struct{})
 	go transport.receive(cancel, done)
 	defer func() { cancel(); conn.Close(); <-done }()
-	return sshagent.ServeAgent(&protectedConnection{owner: p, ctx: ctx}, transport)
+	return sshagent.ServeAgent(&protectedConnection{owner: p, ctx: ctx,
+		trustedLocal: func() bool { return trustedLocalSSH(conn) },
+	}, transport)
 }
 
 // ServeAgent dispatches requests serially, so binding state belongs solely to
 // this connection and needs no shared lock.
 type protectedConnection struct {
-	owner   *Protected
-	ctx     context.Context
-	binding *protectedBinding
-	tainted bool
+	owner        *Protected
+	ctx          context.Context
+	binding      *protectedBinding
+	tainted      bool
+	trustedLocal func() bool
 }
 
 type protectedBinding struct {
@@ -113,7 +127,8 @@ func (c *protectedConnection) SignWithFlags(key ssh.PublicKey, data []byte, flag
 			return nil, err
 		}
 		req := SigningRequest{Fingerprint: ssh.FingerprintSHA256(actual), Comment: candidate.Comment}
-		req.User, req.HostKey = c.destination(actual, data)
+		var localOnly bool
+		req.User, req.HostKey, localOnly = c.destination(actual, data)
 		allowed, err := c.owner.confirm(c.ctx, req)
 		if err != nil {
 			return nil, err
@@ -123,6 +138,11 @@ func (c *protectedConnection) SignWithFlags(key ssh.PublicKey, data []byte, flag
 		}
 		if err := c.ctx.Err(); err != nil {
 			return nil, err
+		}
+		// A peer may exit or change while the dialog is open. Never use a
+		// local-only decision after its original process loses attestation.
+		if localOnly && (c.trustedLocal == nil || !c.trustedLocal()) {
+			return nil, errors.New("agent: local SSH client is no longer trusted")
 		}
 		// The private keyring rechecks lock state and lifetime after confirmation.
 		return c.owner.keyring.SignWithFlags(actual, data, flags)
@@ -134,6 +154,12 @@ func (c *protectedConnection) SignWithFlags(key ssh.PublicKey, data []byte, flag
 // forwarded or additional binding (even a duplicate) permanently forbids
 // signing on this connection. We deliberately do not interpret binding chains.
 func (c *protectedConnection) Extension(name string, contents []byte) ([]byte, error) {
+	if name == ManageDecisionsExtension {
+		if len(contents) != 0 || c.tainted || c.binding != nil || c.owner.openManagement == nil {
+			return nil, sshagent.ErrExtensionUnsupported
+		}
+		return nil, c.owner.openManagement()
+	}
 	if name != "session-bind@openssh.com" {
 		return nil, sshagent.ErrExtensionUnsupported
 	}
@@ -174,9 +200,9 @@ func (c *protectedConnection) Extension(name string, contents []byte) ([]byte, e
 // destination extracts authority only from a complete, matching userauth
 // payload. All other data stays generic; a previous scoped request grants no
 // authority to a subsequent request on the same connection.
-func (c *protectedConnection) destination(key ssh.PublicKey, data []byte) (string, string) {
+func (c *protectedConnection) destination(key ssh.PublicKey, data []byte) (string, string, bool) {
 	if c.binding == nil || len(data) > maxProtectedContextBytes {
-		return "", ""
+		return "", "", false
 	}
 	var auth struct {
 		SessionID             []byte
@@ -188,28 +214,34 @@ func (c *protectedConnection) destination(key ssh.PublicKey, data []byte) (strin
 		Rest                  []byte `ssh:"rest"`
 	}
 	if err := ssh.Unmarshal(data, &auth); err != nil {
-		return "", ""
+		return "", "", false
 	}
 	if !bytes.Equal(auth.SessionID, c.binding.sessionID) || auth.Message != 50 ||
 		auth.User == "" || auth.Service != "ssh-connection" || auth.HasSignature != 1 ||
 		!bytes.Equal(auth.PublicKey, key.Marshal()) || !protectedAuthAlgorithm(key.Type(), auth.Algorithm) {
-		return "", ""
+		return "", "", false
 	}
 	switch auth.Method {
-	// Only hostbound userauth includes the exact server key in the data
-	// being signed. Ordinary publickey requests remain one-shot approvals.
+	// Hostbound userauth is destination-bound even for an untrusted client.
+	// Ordinary publickey is accepted only from an attested local OS SSH
+	// client, using its verified, direct session binding.
 	case "publickey-hostbound-v00@openssh.com":
 		var bound struct{ HostKey []byte }
 		if err := ssh.Unmarshal(auth.Rest, &bound); err != nil {
-			return "", ""
+			return "", "", false
 		}
 		if !bytes.Equal(bound.HostKey, c.binding.hostKey.Marshal()) {
-			return "", ""
+			return "", "", false
 		}
+	case "publickey":
+		if len(auth.Rest) != 0 || c.trustedLocal == nil || !c.trustedLocal() {
+			return "", "", false
+		}
+		return auth.User, ssh.FingerprintSHA256(c.binding.hostKey), true
 	default:
-		return "", ""
+		return "", "", false
 	}
-	return auth.User, ssh.FingerprintSHA256(c.binding.hostKey)
+	return auth.User, ssh.FingerprintSHA256(c.binding.hostKey), false
 }
 
 func protectedAuthAlgorithm(keyType, algorithm string) bool {

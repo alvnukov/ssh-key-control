@@ -67,16 +67,18 @@ func locateFrom(exe string) (string, error) {
 
 // request is one line sent to the helper.
 type request struct {
-	Op          string    `json:"op"`
-	Title       string    `json:"title,omitempty"`
-	Message     string    `json:"message,omitempty"`
-	Remember    *remember `json:"remember,omitempty"`
-	Placeholder string    `json:"placeholder,omitempty"`
-	Allow       string    `json:"allow,omitempty"`
-	Deny        string    `json:"deny,omitempty"`
-	Destination string    `json:"destination,omitempty"`
-	Account     string    `json:"account,omitempty"`
-	Secret      string    `json:"secret,omitempty"`
+	Activate    bool                   `json:"activate,omitempty"`
+	Op          string                 `json:"op"`
+	Title       string                 `json:"title,omitempty"`
+	Message     string                 `json:"message,omitempty"`
+	Remember    *remember              `json:"remember,omitempty"`
+	Placeholder string                 `json:"placeholder,omitempty"`
+	Allow       string                 `json:"allow,omitempty"`
+	Deny        string                 `json:"deny,omitempty"`
+	Destination string                 `json:"destination,omitempty"`
+	Decisions   []ui.TemporaryDecision `json:"decisions,omitempty"`
+	Account     string                 `json:"account,omitempty"`
+	Secret      string                 `json:"secret,omitempty"`
 }
 
 type remember struct {
@@ -85,11 +87,13 @@ type remember struct {
 
 // response is one line received from the helper.
 type response struct {
-	OK       bool           `json:"ok"`
-	Error    string         `json:"error,omitempty"`
-	Answer   string         `json:"answer,omitempty"`
-	Remember bool           `json:"remember,omitempty"`
-	Scope    *ui.GrantScope `json:"scope,omitempty"`
+	Change          *ui.DecisionChange `json:"change,omitempty"`
+	OK              bool               `json:"ok"`
+	Error           string             `json:"error,omitempty"`
+	Answer          string             `json:"answer,omitempty"`
+	Remember        bool               `json:"remember,omitempty"`
+	Scope           *ui.GrantScope     `json:"scope,omitempty"`
+	DurationMinutes json.RawMessage    `json:"durationMinutes,omitempty"`
 }
 
 // Error strings the helper uses for the conditions callers distinguish.
@@ -155,19 +159,27 @@ func (c *Client) call(req request) (response, error) {
 		return response{}, c.failure(fmt.Errorf("read from helper: %w", err))
 	}
 	var resp response
-	if err := json.Unmarshal(reply, &resp); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(reply)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&resp); err != nil {
 		return response{}, errors.New("helper returned an invalid response")
 	}
-	if resp.Scope != nil {
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return response{}, errors.New("helper returned an invalid response")
+	}
+	if resp.Scope != nil || resp.DurationMinutes != nil {
 		if req.Op != "confirm" || !resp.OK {
 			return response{}, errors.New("scope is only valid for an answered confirmation")
 		}
-		if resp.Answer == "yes" && resp.Scope.IsDenyDuration() {
+		if resp.Scope != nil && resp.Answer == "yes" && resp.Scope.IsDenyDuration() {
 			return response{}, errors.New("deny duration is not valid for an allowed confirmation")
 		}
-		if resp.Answer != "yes" && !resp.Scope.IsDenyDuration() {
+		if resp.Scope != nil && resp.Answer != "yes" && !resp.Scope.IsDenyDuration() {
 			return response{}, errors.New("scope is only valid for an allowed confirmation")
 		}
+	}
+	if resp.Change != nil && (req.Op != "manage-decisions" || !resp.OK) {
+		return response{}, errors.New("decision change is only valid for the management window")
 	}
 	if !resp.OK {
 		return resp, mapError(resp.Error)
@@ -236,36 +248,33 @@ func (c *Client) ConfirmScoped(_ context.Context, req ui.ConfirmRequest) (ui.Con
 	if err != nil {
 		return ui.Confirmation{}, err
 	}
-	if resp.Answer != "yes" {
-		// A denial can carry a deny duration the caller remembers as a
-		// standing refusal; anything else on the wire is rejected.
-		scope := ui.GrantOnce
-		if resp.Scope != nil {
-			scope = *resp.Scope
-		}
-		switch scope {
-		case ui.GrantOnce, ui.Deny5Minutes, ui.Deny1Hour:
-		default:
-			return ui.Confirmation{}, fmt.Errorf("unknown denial scope %q", scope)
-		}
-		if req.Destination == "" && scope != ui.GrantOnce {
-			return ui.Confirmation{}, errors.New("timed denial requires a destination")
-		}
-		return ui.Confirmation{Allowed: false, Scope: scope}, nil
+	if resp.Answer != "yes" && resp.Answer != "no" {
+		return ui.Confirmation{}, errors.New("unknown confirmation answer")
 	}
 	scope := ui.GrantOnce
 	if resp.Scope != nil {
 		scope = *resp.Scope
+		if scope == "" {
+			return ui.Confirmation{}, errors.New("empty confirmation scope")
+		}
 	}
-	switch scope {
-	case ui.GrantOnce, ui.Grant5Minutes, ui.Grant15Minutes, ui.GrantDay:
-	default:
-		return ui.Confirmation{}, fmt.Errorf("unknown confirmation scope %q", scope)
+	answer := ui.Confirmation{Allowed: resp.Answer == "yes", Scope: scope}
+	custom := scope == ui.GrantCustom || scope == ui.DenyCustom
+	if custom {
+		if len(resp.DurationMinutes) == 0 || string(resp.DurationMinutes) == "null" ||
+			json.Unmarshal(resp.DurationMinutes, &answer.DurationMinutes) != nil {
+			return ui.Confirmation{}, errors.New("custom duration requires integer minutes")
+		}
+	} else if resp.DurationMinutes != nil {
+		return ui.Confirmation{}, errors.New("minutes are only valid for a custom duration")
+	}
+	if _, _, err := answer.Lifetime(); err != nil {
+		return ui.Confirmation{}, err
 	}
 	if req.Destination == "" && scope != ui.GrantOnce {
 		return ui.Confirmation{}, errors.New("timed confirmation requires a destination")
 	}
-	return ui.Confirmation{Allowed: true, Scope: scope}, nil
+	return answer, nil
 }
 
 // Notify implements ui.Dialogs: the panel is shown at once and stays until

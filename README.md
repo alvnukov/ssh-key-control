@@ -55,12 +55,10 @@ agent and clears in-memory keys and temporary approvals. SSH can reload keys;
 keys added only through `ssh-add` must be added again. Keep the app at the same
 location while enabled.
 
-Before deleting the app, use **Remove Agent Setup…**. Removing setup stops
-launchd supervision, restores the system agent and removes
-managed SSH settings; Keychain entries and history are preserved. If you disabled
-Apple's agent, restore it in Advanced settings and complete any requested logout
-before removing the protected agent. Removal refuses to proceed while the system
-agent's startup is disabled or its status cannot be verified.
+Before deleting the app, use **Remove Agent Setup…**. Removal stops the app's
+launchd jobs and removes its managed SSH settings; Keychain entries and history
+are preserved. It restores the session socket to Apple's existing agent when
+available, without changing Apple's service startup policy.
 
 Local builds are ad-hoc signed. To prepare a public download, use
 `make dmg SIGN_IDENTITY="Developer ID Application: …"`, then submit the DMG
@@ -114,9 +112,9 @@ ssh your-host               # use one of your usual SSH destinations
 When SSH first loads an encrypted key from disk, the dialog asks for its
 passphrase. The key is automatically added to the agent with confirmation
 required. Subsequent agent signatures show Allow/Deny. Return and keypad Enter
-perform the highlighted action (Deny by default). The “Return / Enter” selector
-changes this preference for future dialogs; choosing Allow always means one
-signature, never a timed grant. Escape always denies.
+perform the highlighted action (Deny by default), configured in Settings.
+The shared duration selector applies to both Allow and Deny and starts at
+Once for every request. Escape always denies once.
 The initial disk-based signature and reuse of an already-open SSH connection
 (such as ControlMaster multiplexing) do not require an agent signature and
 therefore do not show that confirmation.
@@ -159,39 +157,23 @@ location. Supervision requires `/Applications` or `~/Applications`; if the app
 moves, run **Enable / Update Agent** again. Remove agent setup before deleting
 the app.
 
-## Disabling Apple's SSH agent
+## Monitoring Apple's SSH agent
 
-In **Settings → Advanced → System SSH agent**, turn on **Disable Apple's SSH
-agent**. This explicitly authorizes changing `com.openssh.ssh-agent` for your
-user: disable automatic loading, then attempt to unload the existing job.
-The protected SSH Key Control agent must already be running.
+**Settings → Advanced → System SSH agent** controls monitoring. It defaults on;
+an explicitly saved off setting survives restarts. The background service checks
+about once a second, removes identities found in Apple's agent, verifies removal,
+records fingerprints and outcomes, and requests macOS notifications. Notifications
+need permission; the settings provide a link to the macOS notification pane.
+Repeated notifications are grouped.
 
-macOS may allow the startup change but refuse unloading a system job while SIP
-is enabled. The switch then means **startup disabled**, not **agent stopped**.
-The app shows the actual loaded/running state and asks you to:
+This is reactive monitoring: a key can be used before detection or loaded again.
+Private key files and Keychain passphrases are not deleted. The app does not
+enable, disable, bootstrap or unload Apple's agent, and does not change SIP or
+other macOS protection. Old startup preferences are ignored. Removing SSH Key
+Control removes its own setup without requiring Apple's service to be enabled.
 
-1. Save your work.
-2. Choose **Apple menu → Log Out**, then sign in again (or restart the Mac).
-3. Open Advanced settings and press **Check Status**. Only a disabled **and
-   unloaded** service is reported as disabled. A remaining loaded service is
-   still capable of activation; the app does not declare success.
-
-To restore the system agent, turn the setting **off**. The app enables its
-startup and attempts to load it. If it remains unloaded, sign out and in again.
-Restore it **before** removing the SSH Key Control agent or deleting the app.
-
-If the app has already been removed, run this recovery command as your own user,
-then log out and in:
-
-```sh
-/bin/launchctl enable "gui/$(id -u)/com.openssh.ssh-agent"
-```
-
-The command restores startup policy only; it does not alter keys or Keychain
-items. This setting does not disable SIP, modify system files, or prevent a
-process from launching a separate agent or reading a private key it can access.
-Apple's OpenSSH Keychain entries are separate from this app's `ssh-key-control`
-entries and are not removed by this setting.
+There is no verified recipe in this project for disabling only Apple's SSH agent
+through Recovery and retaining that result after restoring SIP.
 
 ## Commands
 
@@ -246,21 +228,29 @@ shows what launchd has. Setup from an installed app also registers
 restarts the menu after unsuccessful exits, both with a bounded launch rate; a
 successful menu exit records deliberate Quit.
 
-## Every signature asks
+## Every signature requires an explicit decision
 
-The agent keeps the keys in memory and no client can opt out of the approval
-dialog: adding a key without `-c` still requires Allow for each signature, for
-any program — terminal, script or anything else running as your user. The
-dialog names the key and, when a verified session binding matches a hostbound
-user-authentication request, the remote user and the server's exact host-key
-fingerprint with its known_hosts names. Ordinary publickey authentication and
-requests without this evidence require one-time approval; they cannot create
-or reuse a timed grant. The server key must be part of the signed request.
-A hostname or SSH config alias never grants access to all keys of a server. Allow approves exactly one signature; the menu next to it can
-grant 5 minutes, 15 minutes or the rest of the local day for that key, that
-remote user and that server identity. Grants live only in the agent's memory
-and vanish when it restarts. The Deny menu can silence the same exact
-key/server-fingerprint/user combination for 5 minutes or 1 hour.
+The agent keeps keys in memory. Adding a key without `-c` still requires an
+explicit approval or a matching, unexpired approval chosen earlier in the dialog.
+The dialog names the key, SSH user and exact server host-key fingerprint with
+its known_hosts names when the authentication payload matches a verified session
+binding. Hostbound authentication includes the host key in the signed request.
+For ordinary publickey authentication on a direct connection, macOS must also
+attest the live socket peer as Apple's signed, hardened SSH client; the agent
+checks that identity again before signing. This supports servers without the
+hostbound extension without trusting an arbitrary client's forwarding flag.
+Other ordinary publickey requests remain one-shot and cannot reuse timed decisions.
+A hostname or SSH config alias never grants access to all keys of a server.
+The shared duration selector offers Once, 5 minutes, 15 minutes, the rest of the
+local calendar day, or a custom interval from 1 minute to 24 hours. Both Allow
+and Deny use that duration for the exact key/server-fingerprint/user combination.
+Choosing a duration does not submit a decision. Timed decisions live only in
+the agent's memory and vanish when it restarts. The menu's **Temporary Decisions…**
+window lists active approvals and denials, their exact identities and expiry.
+You can change the remaining interval or revoke a decision; revocation makes
+subsequent matching requests ask again. It cannot undo a signature already issued.
+The public agent socket can only open this window. Edits arrive over the private
+pipe of the helper launched by the daemon and cannot create a new decision.
 Forwarded or repeated session bindings are rejected; agent forwarding and
 multi-hop binding chains are currently unsupported.
 
@@ -339,7 +329,7 @@ defaults write io.github.alvnukov.ssh-key-control rememberInKeychain -bool false
   and is used on purpose.
 - The passphrase passes through the memory of both executables and OpenSSH's
   standard input; neither Go nor Swift guarantees wiping it afterwards.
-- Both executables are ad-hoc signed and not notarised. Gatekeeper does not
+- The executables are ad-hoc signed and not notarised. Gatekeeper does not
   apply to programs that are never opened from the Finder.
 - `ssh-key-control agent` holds added keys in its own memory and checks every
   signature before it is issued; private key bytes pass through this process

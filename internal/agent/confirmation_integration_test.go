@@ -217,10 +217,16 @@ exit 1
 			t.Fatal(err)
 		}
 		protected := agent.NewProtected(func(_ context.Context, req agent.SigningRequest) (bool, error) {
-			// The Go test server supports ordinary publickey, not hostbound:
-			// this must remain a one-shot request with no reusable destination.
-			if req.HostKey != "" || req.User != "" || req.Fingerprint != ssh.FingerprintSHA256(clientSigner.PublicKey()) {
-				t.Errorf("ordinary publickey acquired destination authority: %+v", req)
+			// This is a real, local OS SSH client talking to a server without
+			// hostbound. Only platforms with verified native peer identity may
+			// reuse its signed session binding for ordinary publickey requests.
+			wantUser, wantHost := "", ""
+			if wantTrustedLocalDestination {
+				wantUser = "confirmation-test"
+				wantHost = ssh.FingerprintSHA256(hostSigner.PublicKey())
+			}
+			if req.HostKey != wantHost || req.User != wantUser || req.Fingerprint != ssh.FingerprintSHA256(clientSigner.PublicKey()) {
+				t.Errorf("local SSH destination = %+v; want user %q, host %q", req, wantUser, wantHost)
 			}
 			f, err := os.OpenFile(promptLog, os.O_WRONLY|os.O_APPEND, 0600)
 			if err != nil {

@@ -1,68 +1,37 @@
-# SSH Key Control: release readiness
+# Release verification
 
-Status: source preparation for the first tag-driven release. No published build,
-tag, signature, notarization, or attestation is claimed by this document.
+The first release is v0.1.0, matching the committed app version. Publication is
+triggered by a version tag on main and requires all jobs in `.github/workflows/ci.yml`.
 
-## Branding and compatibility
+## Required automated gates
 
-The app, DMG, executables, Go module, launchd labels, bundle identifier,
-preferences suite, history directory, package metadata, and public repository
-all use SSH Key Control. The reference Homebrew formula points to the public
-repository; no tap is published.
+- Full Git-history secret scan, module verification and tidy check, workflow lint.
+- Go vet, staticcheck, reachable dependency vulnerability scanning and CodeQL.
+- Go race tests and bounded packet/session-binding parser fuzzing.
+- Swift tests with warnings as errors and Objective-C static analysis.
+- Native Apple Silicon and Intel builds, read-only DMG mounting, checksum,
+  architecture, version, code-signature and relocated RU/EN resource validation.
+- Binary vulnerability scan and GitHub artifact attestations before publication.
 
-The public source contains no previous product identifiers. An existing local
-installation requires the explicit private migration in `name-migration.md`;
-the current installer must not use a new service identifier to bypass a denied
-Login Items decision.
+## Distribution limits
 
-## Language
+The current release uses ad-hoc signatures, without Developer ID or Apple
+notarization. Git commit/tag signatures and GitHub attestations establish source
+and build provenance; they do not establish Gatekeeper acceptance. Clean-Mac
+Gatekeeper, macOS 13 compatibility and Intel hardware smoke tests remain manual
+checks beyond the CI macOS 15 runners. No universal binary is claimed.
 
-The UI follows macOS preferred languages. Russian and English catalogs ship in
-both the app and standalone helper installation; unsupported languages fall
-back to English. Quit and reopen the app after changing macOS language settings.
-Approval wire values, fingerprints, key comments, paths and account names remain
-unchanged. OpenSSH-supplied prompts and command diagnostics are preserved verbatim.
+## Product boundaries
 
-The relocation test compiles the actual localization resolver and places it
-beside copied product resources in app and standalone layouts. Its SwiftPM
-fallback fails deliberately, so a passing test cannot depend on a development
-checkout. It checks Russian, English and unsupported-language fallback.
+Timed Allow and Deny decisions require the exact signing-key fingerprint,
+verified host-key fingerprint and SSH username. Unverified requests allow only
+one-time decisions. The default-on Apple-agent monitor removes detected keys
+from that agent's memory and sends system notifications; polling permits use
+before detection. It does not modify private files, Keychain, Apple's launch
+policy or macOS protections. History is local informational evidence, not a
+tamper-proof log or proof of a completed SSH login.
 
-## Local verification
-
-- Go race tests and vet pass, including fail-closed uninstall preflight.
-- Swift tests pass, including lifecycle approval guards, catalog parity,
-  formatting arguments, opaque security data, Return/Escape behavior, and
-  native settings.
-- `make dmg` verifies executable and bundle structure, both language resources,
-  and image integrity. A public release still requires the signing and manual
-  checks below.
-- Run `bash scripts/test-localization.sh "build/SSH Key Control.app"`
-  to verify relocated resources. CI runs this after building the image.
-
-## Before public release
-
-- Obtain a Developer ID signing identity; sign, notarize and staple the release,
-  then regenerate the checksum. No signing identity was available locally.
-- Exercise download/Gatekeeper, drag installation, upgrade and removal on a
-  clean Mac. Verify Intel separately before offering an Intel image.
-- Complete a real logout/login test for Apple's service disable and restore.
-  SIP can leave a disabled service running until logout. Never report that state
-  as fully disabled. Do not remove the protected agent until fallback is restored.
-- The initial tag is v0.1.0. Tag publication is blocked by source security,
-  native tests and DMG verification on both architectures, and CodeQL findings.
-  A tag must match the committed app version and refer to a commit on main.
-  Developer ID and clean-Mac manual validation remain separate distribution gates.
-
-## Security boundary
-
-Approvals are scoped to exact key fingerprint, verified server-key fingerprint
-and SSH user. Plain publickey requests permit one signature only; server names
-never grant access to all server fingerprints. Localization does not alter
-authorization logic.
-
-Disabling Apple's launchd service is not a prohibition on all agent processes.
-Processes with access to private key files or Keychain may use other paths.
-History is local informational evidence, not a tamper-proof audit log or a list
-of completed SSH logins. See SECURITY.md and README for the threat model; tests
-are not a proof of complete security.
+Known previous managed SSH-config prefixes can be migrated explicitly with a
+private backup; unknown or modified prefixes remain protected from overwrite.
+The original install backup is retained across removal and reinstallation.
+Tests are evidence for these contracts, not a proof of complete security.

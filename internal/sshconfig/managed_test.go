@@ -346,3 +346,103 @@ func TestManagedPreservesIncludeAndMatchScope(t *testing.T) {
 		t.Fatal("uninstall changed Include/Match configuration")
 	}
 }
+
+func TestManagedMigratesExactPreviousPrefixes(t *testing.T) {
+	for _, variant := range []string{"current", "password", "routing", "minimal"} {
+		t.Run(variant, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config")
+			oldSocket := filepath.Join(dir, "ssh-askpass.sock")
+			prefix := fmt.Sprintf("# BEGIN ssh-askpass managed config\nAddKeysToAgent confirm\nIdentityAgent %q\nPreferredAuthentications publickey\n# END ssh-askpass managed config\n", oldSocket)
+			switch variant {
+			case "password":
+				prefix = strings.Replace(prefix, "PreferredAuthentications publickey", "NumberOfPasswordPrompts 1", 1)
+			case "routing":
+				prefix = strings.Replace(prefix, "PreferredAuthentications publickey\n", "", 1)
+			case "minimal":
+				prefix = "# BEGIN ssh-askpass managed config\nAddKeysToAgent confirm\n# END ssh-askpass managed config\n"
+			}
+			suffix := []byte("# user's bytes stay exact\r\nHost example.invalid\n  Port 2222\n")
+			original := append([]byte(prefix), suffix...)
+			if err := os.WriteFile(path, original, 0640); err != nil {
+				t.Fatal(err)
+			}
+			config := sshconfig.ManagedConfig{Path: path}
+			needed, err := config.LegacyMigrationNeeded()
+			if err != nil || !needed {
+				t.Fatalf("migration status = %t, %v", needed, err)
+			}
+			if err := config.Install(); err == nil || !strings.Contains(err.Error(), "unknown managed SSH config prefix") {
+				t.Fatalf("ordinary install bypassed consent: %v", err)
+			}
+			if !bytes.Equal(readManagedFile(t, path), original) {
+				t.Fatal("ordinary install changed previous configuration")
+			}
+			if err := config.MigrateLegacy(); err != nil {
+				t.Fatal(err)
+			}
+			installed := readManagedFile(t, path)
+			if !bytes.HasSuffix(installed, suffix) {
+				t.Fatal("migration changed user SSH directives")
+			}
+			if !bytes.Equal(readManagedFile(t, config.MigrationBackupPath()), original) {
+				t.Fatal("migration backup does not contain exact original")
+			}
+			info, err := os.Stat(path)
+			if err != nil || info.Mode().Perm() != 0640 {
+				t.Fatalf("mode after migration = %v, %v", info, err)
+			}
+			if err := config.MigrateLegacy(); err != nil {
+				t.Fatalf("migration is not safely resumable: %v", err)
+			}
+		})
+	}
+}
+
+func TestManagedMigrationRefusesUnknownOrAmbiguousPrefixes(t *testing.T) {
+	for name, original := range map[string]string{
+		"foreign":   "# BEGIN previous-product managed config\nAddKeysToAgent confirm\n# END previous-product managed config\nHost *\n",
+		"modified":  "# BEGIN ssh-askpass managed config\nAddKeysToAgent no\n# END ssh-askpass managed config\nHost *\n",
+		"displaced": "# user comment\n# BEGIN ssh-askpass managed config\nAddKeysToAgent confirm\n# END ssh-askpass managed config\n",
+		"duplicate": "# BEGIN ssh-askpass managed config\nAddKeysToAgent confirm\n# END ssh-askpass managed config\n# BEGIN ssh-askpass managed config\nAddKeysToAgent confirm\n# END ssh-askpass managed config\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config")
+			if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			config := sshconfig.ManagedConfig{Path: path}
+			if needed, err := config.LegacyMigrationNeeded(); err == nil || needed {
+				t.Fatalf("unsafe prefix classified as migratable: %t, %v", needed, err)
+			}
+			if err := config.MigrateLegacy(); err == nil {
+				t.Fatal("unsafe prefix migrated")
+			}
+			if got := readManagedFile(t, path); string(got) != original {
+				t.Fatal("unsafe migration changed config")
+			}
+			if _, err := os.Stat(config.MigrationBackupPath()); !os.IsNotExist(err) {
+				t.Fatalf("unsafe migration created backup: %v", err)
+			}
+		})
+	}
+}
+
+func TestManagedMigrationDoesNotOverwriteDifferentBackup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	original := []byte("# BEGIN ssh-askpass managed config\nAddKeysToAgent confirm\n# END ssh-askpass managed config\nHost *\n")
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	config := sshconfig.ManagedConfig{Path: path}
+	if err := os.WriteFile(config.MigrationBackupPath(), []byte("different"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.MigrateLegacy(); err == nil || !strings.Contains(err.Error(), "different contents") {
+		t.Fatalf("migration error = %v", err)
+	}
+	if !bytes.Equal(readManagedFile(t, path), original) {
+		t.Fatal("backup conflict changed config")
+	}
+}

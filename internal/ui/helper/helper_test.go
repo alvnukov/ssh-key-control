@@ -36,6 +36,10 @@ func fakeHelper() {
 			fmt.Fprintln(os.Stderr, "bad json:", err)
 			os.Exit(2)
 		}
+		if req["title"] == "raw response" {
+			fmt.Fprintln(os.Stdout, req["message"])
+			continue
+		}
 		fmt.Fprintln(os.Stderr, "got", in.Text())
 		resp := map[string]any{"ok": true}
 		switch req["op"] {

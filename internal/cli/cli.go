@@ -108,7 +108,9 @@ const usage = `usage: ssh-key-control <prompt>            answer an OpenSSH prom
        ssh-key-control install [--require force|prefer]
        ssh-key-control uninstall
        ssh-key-control status
-       ssh-key-control system-agent status|disable|enable
+       ssh-key-control system-agent status
+       ssh-key-control permissions          open active temporary decisions
+       ssh-key-control native-agent-monitor status|disable|enable
        ssh-key-control doctor
        ssh-key-control forget <account>...
        ssh-key-control version
@@ -142,8 +144,16 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		return a.exit(a.lifecycle(ctx, rest))
 	case "repair":
 		return a.exit(a.repair(ctx, rest))
+	case "config-migration":
+		return a.exit(a.configMigration(rest))
+	case "migrate-config":
+		return a.exit(a.migrateConfig(ctx, rest))
 	case "stop-menu":
 		return a.exit(a.stopMenu(ctx, rest))
+	case "permissions":
+		return a.exit(a.openTemporaryDecisions(ctx, rest))
+	case "native-agent-monitor":
+		return a.exit(a.nativeAgentMonitor(rest))
 	case "system-agent":
 		return a.exit(a.systemAgent(ctx, rest))
 	case "doctor":
@@ -549,7 +559,8 @@ func (a *App) agent(ctx context.Context, args []string) error {
 			KeyFingerprint: d.KeyFingerprint, HostFingerprint: d.HostFingerprint, User: d.User,
 			Scope: d.Scope, ExpiresAt: d.ExpiresAt})
 	})
-	protected := agent.NewProtected(func(ctx context.Context, req agent.SigningRequest) (bool, error) {
+	management := &temporaryDecisionManager{app: a, authorizer: authorizer, ctx: ctx}
+	protected := agent.NewProtectedWithManagement(func(ctx context.Context, req agent.SigningRequest) (bool, error) {
 		var destination *confirmation.Destination
 		if req.HostKey != "" && req.User != "" {
 			destination = &confirmation.Destination{
@@ -558,12 +569,21 @@ func (a *App) agent(ctx context.Context, args []string) error {
 			}
 		}
 		return authorizer.Authorize(ctx, req.Fingerprint, req.Comment, destination)
-	})
+	}, management.open)
 	return agent.Run(ctx, agent.Runtime{
 		SocketLink: (sshconfig.ManagedConfig{Path: a.SSHConfig}).SocketPath(),
 		Getenv:     a.Getenv,
-		Serve:      func(ctx context.Context) error { return agent.ServeListener(ctx, listener, protected) },
-		Launchctl:  a.Launchctl,
-		Log:        log.New(a.Stderr, "ssh-key-control agent: ", 0),
+		Serve: func(ctx context.Context) error {
+			monitorContext, stopMonitor := context.WithCancel(ctx)
+			monitorDone := make(chan struct{})
+			go func() {
+				defer close(monitorDone)
+				a.runNativeMonitor(monitorContext, []string{listener.Addr().String(), a.Getenv(agent.SocketKey), (sshconfig.ManagedConfig{Path: a.SSHConfig}).SocketPath()}, record)
+			}()
+			defer func() { stopMonitor(); <-monitorDone }()
+			return agent.ServeListener(ctx, listener, protected)
+		},
+		Launchctl: a.Launchctl,
+		Log:       log.New(a.Stderr, "ssh-key-control agent: ", 0),
 	})
 }

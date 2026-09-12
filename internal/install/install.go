@@ -244,24 +244,7 @@ func (i *Installer) Uninstall(ctx context.Context) error {
 			return fmt.Errorf("checking SSH confirmation settings: %w", err)
 		}
 	}
-	system, err := i.Launchctl.SystemAgentStatus(ctx)
-	if err != nil {
-		return fmt.Errorf("cannot verify system SSH agent before removal: %w", err)
-	}
-	if system.Disabled {
-		return errors.New("restore Apple's SSH agent in Advanced settings before removing setup; if requested, log out and sign in again")
-	}
-	if !system.Loaded {
-		ours, err := i.Launchctl.Print(ctx, agent.Label)
-		if err != nil && !errors.Is(err, launchd.ErrNotLoaded) {
-			return fmt.Errorf("cannot verify protected agent before removal: %w", err)
-		}
-		if ours != nil {
-			return errors.New("system SSH agent is not loaded; restore it in Advanced settings and complete the requested sign-out before removing setup")
-		}
-	}
-	// Refuse to unload the agent if edited managed settings cannot be removed
-	// safely. The caller can resolve the conflict without losing the service.
+	// Removing our routing must not depend on or mutate Apple's startup policy.
 	if i.SSHConfig != nil {
 		if err := i.SSHConfig.Uninstall(); err != nil {
 			return fmt.Errorf("removing SSH confirmation settings: %w", err)

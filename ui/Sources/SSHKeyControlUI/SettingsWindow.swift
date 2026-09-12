@@ -65,9 +65,9 @@ struct GeneralSettingsView: View {
             Section {
                 Picker(L10n.string("Return and Enter"), selection: $enterAction) {
                     Text(L10n.string("Deny")).tag("deny")
-                    Text(L10n.string("Allow once")).tag("allow")
+                    Text(L10n.string("Allow")).tag("allow")
                 }
-                Text(L10n.string("The matching button is highlighted. Escape always denies."))
+                Text(L10n.string("The highlighted button uses the selected duration. Escape always denies once."))
                     .font(.callout).foregroundStyle(.secondary)
             } header: { Text(L10n.string("Confirmations")) }
             Section {
@@ -109,9 +109,10 @@ struct GeneralSettingsView: View {
 
 struct AdvancedSettingsView: View {
     @ObservedObject var model: HistorySettingsModel
+    @ObservedObject var monitor: NativeAgentMonitorModel
     var body: some View {
         Form {
-            SystemAgentSettingsSection()
+            SystemAgentSettingsSection(model: monitor)
             Section {
                 Picker(L10n.string("Keep history for"), selection: $model.policy.retentionDays) {
                     Text(L10n.string("1 day")).tag(1); Text(L10n.string("7 days")).tag(7); Text(L10n.string("30 days")).tag(30)
@@ -127,7 +128,7 @@ struct AdvancedSettingsView: View {
             } header: { Text(L10n.string("Security history")) }
             Section {
                 LabeledContent(L10n.string("Reusable approvals"), value: L10n.string("Exact key + server key + user"))
-                LabeledContent(L10n.string("Destination proof"), value: L10n.string("Hostbound required"))
+                LabeledContent(L10n.string("Destination proof"), value: L10n.string("Verified session and SSH client"))
                 LabeledContent(L10n.string("Connections / packet size"), value: L10n.string("64 / 256 KiB"))
                 LabeledContent(L10n.string("Partial request timeout"), value: L10n.string("5 seconds"))
                 Text(L10n.string("These limits describe this build. History is informational and is never used to authorize requests."))
@@ -146,7 +147,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let historySettings = HistorySettingsModel()
     private let tabs = SettingsTabController()
 
-    init(lifecycle: LifecycleModel = LifecycleModel()) {
+    init(lifecycle: LifecycleModel = LifecycleModel(), monitor: NativeAgentMonitorModel = .shared) {
         self.lifecycle = lifecycle
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 500),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
@@ -158,7 +159,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         general.viewController?.preferredContentSize = NSSize(width: 520, height: 410)
         general.label = L10n.string("General")
         general.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
-        let advanced = NSTabViewItem(viewController: NSHostingController(rootView: AdvancedSettingsView(model: historySettings)))
+        let advanced = NSTabViewItem(viewController: NSHostingController(rootView: AdvancedSettingsView(model: historySettings, monitor: monitor)))
         advanced.viewController?.preferredContentSize = NSSize(width: 560, height: 690)
         advanced.label = L10n.string("Advanced")
         advanced.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: nil)

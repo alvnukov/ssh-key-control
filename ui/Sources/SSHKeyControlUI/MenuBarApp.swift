@@ -24,8 +24,20 @@ public final class MenuBarApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.autoenablesItems = false
         menu.delegate = self
-        menu.addItem(withTitle: "SSH Key Control", action: nil, keyEquivalent: "").isEnabled = false
+        let title = NSTextField(labelWithString: "SSH Key Control")
+        title.font = NSFont.systemFont(ofSize: NSFont.menuFont(ofSize: 0).pointSize, weight: .semibold)
+        title.textColor = .labelColor
+        title.sizeToFit()
+        title.setAccessibilityRole(.staticText)
+        let titleView = NSView(frame: NSRect(x: 0, y: 0, width: title.frame.width + 28, height: title.frame.height + 12))
+        title.setFrameOrigin(NSPoint(x: 14, y: 6))
+        titleView.addSubview(title)
+        let titleItem = NSMenuItem(title: "SSH Key Control", action: nil, keyEquivalent: "")
+        titleItem.isEnabled = false
+        titleItem.view = titleView
+        menu.addItem(titleItem)
         menu.addItem(.separator())
+        menu.addItem(actionItem(L10n.string("Temporary Decisions…"), #selector(openTemporaryDecisions)))
         menu.addItem(actionItem(L10n.string("Security History…"), #selector(openHistory), key: "y"))
         menu.addItem(actionItem(L10n.string("Settings…"), #selector(openSettings), key: ","))
         menu.addItem(actionItem(L10n.string("Set Up SSH Agent…"), #selector(openSetup)))
@@ -36,6 +48,7 @@ public final class MenuBarApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.menu = menu
         self.item = item
         installMainMenu()
+        NativeAgentMonitorModel.shared.start()
         let defaults = UserDefaults.standard
         let needsInitialSetup = !defaults.bool(forKey: "hasSeenAgentSetup") || CommandLine.arguments.contains("--setup")
         if CommandLine.arguments.contains("--settings") {
@@ -106,6 +119,18 @@ public final class MenuBarApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openSettings() {
         if settings == nil { settings = SettingsWindowController(lifecycle: lifecycle) }
         settings?.open()
+    }
+    @objc private func openTemporaryDecisions() {
+        Task {
+            let result = await AgentSetupCommand.run(.permissions, bundle: Bundle.main.bundleURL)
+            if !result.succeeded {
+                let alert = NSAlert()
+                alert.messageText = L10n.string("Could not open temporary decisions")
+                alert.informativeText = L10n.string(result.details)
+                alert.addButton(withTitle: L10n.string("OK"))
+                alert.runModal()
+            }
+        }
     }
     @objc private func openHistory() {
         if history == nil { history = HistoryWindowController(model: historyModel) }

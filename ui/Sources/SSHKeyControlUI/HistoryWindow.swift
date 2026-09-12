@@ -98,14 +98,21 @@ private struct EventDetails: View {
         VStack(alignment: .leading, spacing: 18) {
             Text(event.title).font(.title2).bold()
             Text(event.time.formatted(date: .complete, time: .standard)).foregroundStyle(.secondary)
+            if event.kind == "native_agent" {
+                if let fingerprint = event.keyFingerprint { field(L10n.string("Signing key"), fingerprint, fingerprint: true) }
+                if event.outcome == "native_removed" {
+                    Text(L10n.string("Another application may add the key again. Monitoring continues."))
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+            }
             if event.kind == "decision" {
                 field(L10n.string("Signing key"), event.keyFingerprint ?? L10n.string("Unknown"), fingerprint: true)
-                field(L10n.string("Destination"), event.isVerified ? L10n.string("Verified hostbound request") : L10n.string("Not verified — one signature only"))
+                field(L10n.string("Destination"), event.isVerified ? L10n.string("Verified server identity") : L10n.string("Not verified — one signature only"))
                 if event.isVerified {
                     field(L10n.string("Server key"), event.hostFingerprint ?? "", fingerprint: true)
                     field(L10n.string("SSH user"), event.user ?? "")
                 }
-                field(L10n.string("Decision source"), event.source == "cached" ? L10n.string("Previously remembered decision") : L10n.string("Confirmation dialog"))
+                field(L10n.string("Decision source"), event.source == "management" ? L10n.string("Management") : (event.source == "cached" ? L10n.string("Previously remembered decision") : L10n.string("Confirmation dialog")))
                 field(L10n.string("Scope"), scopeName(event.scope))
                 if let expiry = event.expiresAt {
                     field(L10n.string("Expiry recorded at this decision"), expiry.formatted(date: .abbreviated, time: .standard))
@@ -129,6 +136,10 @@ private struct EventDetails: View {
         case "day": L10n.string("Allow until end of local day")
         case "deny5m": L10n.string("Deny for 5 minutes")
         case "deny1h": L10n.string("Deny for 1 hour")
+        case "deny15m": L10n.string("Deny for 15 minutes")
+        case "denyday": L10n.string("Deny until end of local day")
+        case "custom": L10n.string("Allow for a custom interval")
+        case "denycustom": L10n.string("Deny for a custom interval")
         case "timed-approval": L10n.string("Remembered approval")
         case "timed-denial": L10n.string("Remembered denial")
         default: L10n.string("One request")

@@ -63,19 +63,24 @@ const (
 	Grant15Minutes GrantScope = "15m"
 	GrantDay       GrantScope = "day" // Until the end of the local day.
 	Deny5Minutes   GrantScope = "deny5m"
-	Deny1Hour      GrantScope = "deny1h"
+	Deny1Hour      GrantScope = "deny1h" // Kept for older helpers.
+	Deny15Minutes  GrantScope = "deny15m"
+	DenyDay        GrantScope = "denyday"
+	GrantCustom    GrantScope = "custom"
+	DenyCustom     GrantScope = "denycustom"
 )
 
 // IsDenyDuration reports whether the scope extends a refusal, not a grant.
 func (s GrantScope) IsDenyDuration() bool {
-	return s == Deny5Minutes || s == Deny1Hour
+	return s == Deny5Minutes || s == Deny1Hour || s == Deny15Minutes || s == DenyDay || s == DenyCustom
 }
 
 // Confirmation carries a decision; for a denial the Scope matters only when
 // it is a deny duration, which the caller remembers as a standing refusal.
 type Confirmation struct {
-	Allowed bool
-	Scope   GrantScope
+	Allowed         bool
+	Scope           GrantScope
+	DurationMinutes int // Only custom scopes; 1..1440. Zero means absent.
 }
 
 // ScopedDialogs offers confirmation lifetimes without changing legacy Dialogs.

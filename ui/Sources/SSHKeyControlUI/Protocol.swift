@@ -6,6 +6,7 @@ public struct Request: Codable, Equatable, Sendable {
         case secret
         case text
         case confirm
+        case manageDecisions = "manage-decisions"
         case notify
         case keychainGet = "keychain.get"
         case keychainSet = "keychain.set"
@@ -28,11 +29,14 @@ public struct Request: Codable, Equatable, Sendable {
     public var account: String?
     public var secret: String?
     public var destination: String?
+    public var decisions: [TemporaryDecision]?
+    public var activate: Bool?
 
     public init(
         op: Op, title: String? = nil, message: String? = nil, remember: Remember? = nil,
         placeholder: String? = nil, allow: String? = nil, deny: String? = nil,
-        account: String? = nil, secret: String? = nil, destination: String? = nil
+        account: String? = nil, secret: String? = nil, destination: String? = nil,
+        decisions: [TemporaryDecision]? = nil, activate: Bool? = nil
     ) {
         self.op = op
         self.title = title
@@ -44,6 +48,8 @@ public struct Request: Codable, Equatable, Sendable {
         self.account = account
         self.secret = secret
         self.destination = destination
+        self.decisions = decisions
+        self.activate = activate
     }
 }
 
@@ -55,21 +61,39 @@ public enum GrantScope: String, Codable, Sendable, CaseIterable {
     case fifteenMinutes = "15m"
     case day
     case denyFiveMinutes = "deny5m"
-    case denyOneHour = "deny1h"
+    case denyOneHour = "deny1h" // Retained for older helpers.
+    case denyFifteenMinutes = "deny15m"
+    case denyDay = "denyday"
+    case custom
+    case denyCustom = "denycustom"
 
     /// True for the durations that extend a denial instead of a grant.
     public var isDenyDuration: Bool {
-        self == .denyFiveMinutes || self == .denyOneHour
+        [.denyFiveMinutes, .denyOneHour, .denyFifteenMinutes, .denyDay, .denyCustom].contains(self)
+    }
+
+    /// One duration selector serves both decision buttons.
+    func scope(forAllowed allowed: Bool) -> GrantScope? {
+        switch self {
+        case .once: return .once
+        case .fiveMinutes: return allowed ? .fiveMinutes : .denyFiveMinutes
+        case .fifteenMinutes: return allowed ? .fifteenMinutes : .denyFifteenMinutes
+        case .day: return allowed ? .day : .denyDay
+        case .custom: return allowed ? .custom : .denyCustom
+        default: return nil
+        }
     }
 }
 
 public struct Confirmation: Equatable, Sendable {
     public var allowed: Bool
     public var scope: GrantScope
+    public var durationMinutes: Int?
 
-    public init(allowed: Bool, scope: GrantScope = .once) {
+    public init(allowed: Bool, scope: GrantScope = .once, durationMinutes: Int? = nil) {
         self.allowed = allowed
         self.scope = scope
+        self.durationMinutes = durationMinutes
     }
 }
 
@@ -80,6 +104,8 @@ public struct Response: Codable, Equatable, Sendable {
     public var answer: String?
     public var remember: Bool?
     public var scope: GrantScope? = nil
+    public var durationMinutes: Int? = nil
+    public var change: DecisionChange? = nil
 
     /// A scope travels with the answer only when the caller can use it:
     /// any scope on an allowed answer, deny durations on a denied one,
@@ -88,6 +114,7 @@ public struct Response: Codable, Equatable, Sendable {
         var response = success(answer: choice.allowed ? "yes" : "no")
         if choice.allowed || choice.scope.isDenyDuration {
             response.scope = choice.scope
+            response.durationMinutes = choice.durationMinutes
         }
         return response
     }

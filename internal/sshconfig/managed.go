@@ -17,6 +17,8 @@ import (
 // directory; this API does not lock out concurrent external editors.
 type ManagedConfig struct{ Path string }
 
+const legacyMinimalPrefix = "# BEGIN ssh-askpass managed config\nAddKeysToAgent confirm\n# END ssh-askpass managed config\n"
+
 // SocketPath is the stable link maintained by the launch agent next to config.
 func (c ManagedConfig) SocketPath() string {
 	return filepath.Join(filepath.Dir(c.Path), "ssh-key-control.sock")
@@ -30,6 +32,73 @@ func (c ManagedConfig) prefix() (string, error) {
 	// OpenSSH expands percent tokens even inside quotes.
 	path = strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "%", "%%").Replace(path)
 	return "# BEGIN ssh-key-control managed config\nAddKeysToAgent confirm\nIdentityAgent \"" + path + "\"\nPreferredAuthentications publickey\n# END ssh-key-control managed config\n", nil
+}
+
+func (c ManagedConfig) legacyPrefixes() ([]string, error) {
+	path := filepath.Join(filepath.Dir(c.Path), "ssh-askpass.sock")
+	if !filepath.IsAbs(path) || strings.ContainsAny(path, "\r\n\x00$") {
+		return nil, fmt.Errorf("unsupported previous SSH agent socket path %q", path)
+	}
+	path = strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "%", "%%").Replace(path)
+	prefix := "# BEGIN ssh-askpass managed config\nAddKeysToAgent confirm\nIdentityAgent \"" + path + "\"\nPreferredAuthentications publickey\n# END ssh-askpass managed config\n"
+	return []string{
+		prefix,
+		strings.Replace(prefix, "PreferredAuthentications publickey", "NumberOfPasswordPrompts 1", 1),
+		strings.Replace(prefix, "PreferredAuthentications publickey\n", "", 1),
+		legacyMinimalPrefix,
+	}, nil
+}
+
+// LegacyMigrationNeeded reports whether Path begins with a byte-exact block
+// written by a previous SSH Key Control installation. It never changes Path.
+func (c ManagedConfig) LegacyMigrationNeeded() (bool, error) {
+	data, _, err := c.read()
+	if err != nil {
+		return false, err
+	}
+	legacy, err := c.legacyOwned(data)
+	if err != nil {
+		return false, err
+	}
+	if legacy > 0 {
+		return true, nil
+	}
+	_, err = c.owned(data)
+	return false, err
+}
+
+// MigrationBackupPath is the retained, private copy made before migration.
+func (c ManagedConfig) MigrationBackupPath() string { return c.Path + ".ssh-key-control.migration.bak" }
+
+// MigrateLegacy replaces only a byte-exact previous managed prefix. The rest
+// of the SSH configuration and its mode are preserved exactly.
+func (c ManagedConfig) MigrateLegacy() error {
+	data, info, err := c.read()
+	if err != nil {
+		return err
+	}
+	legacy, err := c.legacyOwned(data)
+	if err != nil {
+		return err
+	}
+	if legacy == 0 {
+		installed, installErr := c.Installed()
+		if installErr != nil {
+			return installErr
+		}
+		if installed {
+			return nil
+		}
+		return fmt.Errorf("SSH config %q does not contain a recognized previous managed prefix", c.Path)
+	}
+	prefix, err := c.prefix()
+	if err != nil {
+		return err
+	}
+	if err := c.backupAt(c.MigrationBackupPath(), data); err != nil {
+		return err
+	}
+	return c.replace(data, append([]byte(prefix), data[legacy:]...), info)
 }
 
 // Install prepends managed global directives without changing existing scope.
@@ -130,6 +199,30 @@ func (c ManagedConfig) owned(data []byte) (int, error) {
 	return owned, nil
 }
 
+func (c ManagedConfig) legacyOwned(data []byte) (int, error) {
+	prefixes, err := c.legacyPrefixes()
+	if err != nil {
+		return 0, err
+	}
+	owned := 0
+	for _, prefix := range prefixes {
+		if bytes.HasPrefix(data, []byte(prefix)) {
+			owned = len(prefix)
+			break
+		}
+	}
+	if owned == 0 {
+		return 0, nil
+	}
+	rest := data[owned:]
+	for _, marker := range []string{"ssh-askpass managed config", "# BEGIN ssh-askpass", "# END ssh-askpass", "ssh-key-control managed config", "# BEGIN ssh-key-control", "# END ssh-key-control"} {
+		if bytes.Contains(rest, []byte(marker)) {
+			return 0, fmt.Errorf("SSH config %q has malformed, modified, displaced or duplicate ownership markers", c.Path)
+		}
+	}
+	return owned, nil
+}
+
 // regularManagedFile uses Lstat so dangling links are not treated as missing.
 func regularManagedFile(path string) (os.FileInfo, error) {
 	info, err := os.Lstat(path)
@@ -176,14 +269,29 @@ func (c ManagedConfig) read() ([]byte, os.FileInfo, error) {
 
 // backup saves the pre-install contents only; uninstall never creates a backup.
 func (c ManagedConfig) backup(original []byte) error {
-	backup := c.Path + ".ssh-key-control.bak"
+	return c.backupAt(c.Path+".ssh-key-control.bak", original)
+}
+
+func (c ManagedConfig) backupAt(backup string, original []byte) error {
 	f, err := os.OpenFile(backup, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		if !os.IsExist(err) {
 			return fmt.Errorf("create SSH config backup %q: %w", backup, err)
 		}
-		_, err := regularManagedFile(backup)
-		return err
+		// The install backup retains the original contents across reinstallations.
+		// Migration backups must instead match the exact input being migrated.
+		if backup == c.Path+".ssh-key-control.bak" {
+			_, checkErr := regularManagedFile(backup)
+			return checkErr
+		}
+		existing, readErr := readRegularFile(backup)
+		if readErr != nil {
+			return readErr
+		}
+		if !bytes.Equal(existing, original) {
+			return fmt.Errorf("SSH config backup %q already exists with different contents", backup)
+		}
+		return nil
 	}
 	_, writeErr := f.Write(original)
 	if writeErr == nil {
@@ -199,6 +307,30 @@ func (c ManagedConfig) backup(original []byte) error {
 		return fmt.Errorf("close SSH config backup %q: %w", backup, closeErr)
 	}
 	return nil
+}
+
+func readRegularFile(path string) ([]byte, error) {
+	info, err := regularManagedFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if info == nil {
+		return nil, os.ErrNotExist
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open SSH config backup %q: %w", path, err)
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		return nil, fmt.Errorf("SSH config backup %q changed while opening", path)
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("read SSH config backup %q: %w", path, err)
+	}
+	return data, nil
 }
 
 func (c ManagedConfig) replace(original, replacement []byte, info os.FileInfo) error {

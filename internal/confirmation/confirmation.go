@@ -25,12 +25,11 @@ type Dialogs interface {
 }
 
 type Authorizer struct {
-	observe func(Decision)
-	gate    chan struct{}
-	dialogs Dialogs
-	now     func() time.Time
-	grants  map[grantKey]time.Time
-	denials map[grantKey]time.Time
+	observe   func(Decision)
+	gate      chan struct{}
+	dialogs   Dialogs
+	now       func() time.Time
+	decisions *decisionStore
 }
 
 func New(dialogs Dialogs, now func() time.Time) *Authorizer {
@@ -42,7 +41,7 @@ func NewWithObserver(dialogs Dialogs, now func() time.Time, observe func(Decisio
 	if now == nil {
 		now = time.Now
 	}
-	return &Authorizer{observe: observe, gate: make(chan struct{}, 1), dialogs: dialogs, now: now, grants: make(map[grantKey]time.Time), denials: make(map[grantKey]time.Time)}
+	return &Authorizer{observe: observe, gate: make(chan struct{}, 1), dialogs: dialogs, now: now, decisions: newDecisionStore(now)}
 }
 
 // Authorize serializes dialogs. An unknown destination always prompts, even if
@@ -80,17 +79,6 @@ func (a *Authorizer) Authorize(ctx context.Context, fingerprint, comment string,
 	if fingerprint == "" {
 		return false, fmt.Errorf("missing signing key identity")
 	}
-	now := a.now()
-	for k, expires := range a.grants {
-		if !now.Before(expires) {
-			delete(a.grants, k)
-		}
-	}
-	for k, until := range a.denials {
-		if !now.Before(until) {
-			delete(a.denials, k)
-		}
-	}
 	req := ui.ConfirmRequest{Title: "Allow SSH key use?", Message: clean(comment) + "\nKey: " + fingerprint}
 	if destination == nil || destination.HostKey == "" || destination.User == "" {
 		req.Message += "\n\nDestination not verified. This approval applies to one signature only."
@@ -101,19 +89,14 @@ func (a *Authorizer) Authorize(ctx context.Context, fingerprint, comment string,
 		return allowed, err
 	}
 	key := grantKey{fingerprint, destination.HostKey, destination.User}
-	// A standing refusal silences the prompt entirely, exactly as a grant
-	// would have authorized it silently.
-	if until, ok := a.denials[key]; ok && now.Before(until) {
+	if cached, ok := a.decisions.lookup(key); ok {
 		decision.Source = "cached"
-		decision.ExpiresAt = &until
+		decision.ExpiresAt = &cached.expires
 		decision.Scope = "timed-denial"
-		return false, nil
-	}
-	if expires, ok := a.grants[key]; ok && now.Before(expires) {
-		decision.Source = "cached"
-		decision.ExpiresAt = &expires
-		decision.Scope = "timed-approval"
-		return true, nil
+		if cached.allowed {
+			decision.Scope = "timed-approval"
+		}
+		return cached.allowed, nil
 	}
 	name := clean(destination.Host)
 	if name == "" {
@@ -135,47 +118,18 @@ func (a *Authorizer) Authorize(ctx context.Context, fingerprint, comment string,
 	if ctx.Err() != nil {
 		return false, ctx.Err()
 	}
-	if err != nil || !answer.Allowed {
-		delete(a.grants, key)
-		if err != nil {
-			return false, err
-		}
-		now = a.now() // Lease starts when the user answers, not when the dialog opened.
-		switch answer.Scope {
-		case "", ui.GrantOnce:
-			delete(a.denials, key) // A plain denial refuses once, nothing more.
-		case ui.Deny5Minutes:
-			a.denials[key] = now.Add(5 * time.Minute)
-		case ui.Deny1Hour:
-			a.denials[key] = now.Add(time.Hour)
-		default:
-			return false, fmt.Errorf("unsupported denial duration %q", answer.Scope)
-		}
-		if until, ok := a.denials[key]; ok {
-			decision.ExpiresAt = &until
-		}
-		return false, nil
+	if err != nil {
+		a.decisions.forget(key)
+		return false, err
 	}
-	delete(a.denials, key) // A later approval supersedes any refusal.
-	// Start a lease when the user approves, not when the dialog opened.
-	now = a.now()
-	var until time.Time
-	switch answer.Scope {
-	case "", ui.GrantOnce:
-		return true, nil
-	case ui.Grant5Minutes:
-		until = now.Add(5 * time.Minute)
-	case ui.Grant15Minutes:
-		until = now.Add(15 * time.Minute)
-	case ui.GrantDay:
-		y, m, d := now.Date()
-		until = time.Date(y, m, d+1, 0, 0, 0, 0, now.Location())
-	default:
-		return false, fmt.Errorf("unsupported approval duration %q", answer.Scope)
+	until, err := a.decisions.remember(key, destination.Host, answer)
+	if err != nil {
+		return false, err
 	}
-	decision.ExpiresAt = &until
-	a.grants[key] = until
-	return true, nil
+	if !until.IsZero() {
+		decision.ExpiresAt = &until
+	}
+	return answer.Allowed, nil
 }
 
 func clean(s string) string {

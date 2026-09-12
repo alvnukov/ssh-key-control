@@ -10,11 +10,15 @@ public protocol Dialogs {
     /// Asks a yes/no question; true means allowed.
     func confirm(title: String, message: String, allow: String, deny: String) throws -> Bool
     func confirmScoped(title: String, message: String, allow: String, deny: String, destination: String) throws -> Confirmation
+    func manageDecisions(_ decisions: [TemporaryDecision], message: String, activate: Bool) throws -> DecisionChange
     /// Shows a panel and returns at once; the panel lives until the process ends.
     func notify(title: String, message: String) throws
 }
 
 public extension Dialogs {
+    func manageDecisions(_ decisions: [TemporaryDecision], message: String, activate: Bool) throws -> DecisionChange {
+        throw Failure.other("Temporary decision management is unavailable.")
+    }
     /// Older implementations can only grant this request once.
     func confirmScoped(title: String, message: String, allow: String, deny: String, destination: String) throws -> Confirmation {
         Confirmation(allowed: try confirm(title: title, message: message, allow: allow, deny: deny))
@@ -67,6 +71,11 @@ public struct Dispatcher {
                 title: req.title ?? "", message: req.message ?? "",
                 allow: req.allow ?? "Allow", deny: req.deny ?? "Deny")
             return .success(answer: allowed ? "yes" : "no")
+        case .manageDecisions:
+            let change = try dialogs.manageDecisions(req.decisions ?? [], message: req.message ?? "", activate: req.activate ?? false)
+            var response = Response.success()
+            response.change = change
+            return response
         case .notify:
             try dialogs.notify(title: req.title ?? "", message: req.message ?? "")
             return .success()

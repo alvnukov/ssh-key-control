@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import XCTest
 @testable import SSHKeyControlUI
 
@@ -42,59 +42,71 @@ final class ScopedConfirmationTests: XCTestCase {
         XCTAssertEqual(dispatcher.handle(Request(op: .confirm, destination: "alice@production")), .failure(.cancelled))
     }
 
-    func testPanelKeyboardLoop() {
-        let panel = ConfirmationPanel(title: "Allow?", message: "m", allow: "Allow", deny: "Deny", destination: "root@server")
+    func testOneDurationSelectorOffersBothDecisionsAndStartsOnce() {
+        let panel = ConfirmationPanel(title: "Allow SSH key use?", message: "", allow: "Allow", deny: "Deny", destination: "root @ server")
+        XCTAssertEqual(panel.durationPicker.itemArray.compactMap { $0.representedObject as? String },
+                       ["once", "5m", "15m", "day", "custom"])
+        XCTAssertEqual(panel.durationPicker.indexOfSelectedItem, 0)
         XCTAssertTrue(panel.initialFirstResponder === panel.denyButton)
-        XCTAssertTrue(panel.allowButton.nextKeyView === panel.denyButton)
-        XCTAssertTrue(panel.denyButton.nextKeyView === panel.enterActionPicker)
-        XCTAssertTrue(panel.enterActionPicker.nextKeyView === panel.allowButton)
-    }
-
-    func testPanelWithoutDestinationKeepsTwoButtonLoop() {
-        let panel = ConfirmationPanel(title: "Allow?", message: "m", allow: "Allow", deny: "Deny", destination: "")
-        XCTAssertNil(panel.allowButton.menu)
-        XCTAssertNil(panel.denyButton.menu)
-        XCTAssertFalse(panel.allowButton is NSComboButton)
+        XCTAssertTrue(panel.allowButton.nextKeyView === panel.durationPicker)
+        XCTAssertTrue(panel.durationPicker.nextKeyView === panel.denyButton)
         XCTAssertTrue(panel.defaultButtonCell === panel.denyButton.cell)
-        XCTAssertEqual((panel.denyButton as? NSButton)?.keyEquivalent, "\r")
+    }
+
+    func testUnverifiedDestinationCannotOfferTimedChoices() {
+        let panel = ConfirmationPanel(title: "Allow SSH key use?", message: "work\nKey: SHA256:test", allow: "Allow", deny: "Deny", destination: "")
+        XCTAssertEqual(panel.durationPicker.itemArray.compactMap { $0.representedObject as? String }, ["once"])
+        XCTAssertFalse(panel.durationPicker.isEnabled)
         XCTAssertTrue(panel.allowButton.nextKeyView === panel.denyButton)
-        XCTAssertTrue(panel.denyButton.nextKeyView === panel.enterActionPicker)
-        XCTAssertTrue(panel.enterActionPicker.nextKeyView === panel.allowButton)
     }
 
-    func testDurationMenusStayEnabledAndOfferDenyDurations() {
-        let panel = ConfirmationPanel(title: "Allow?", message: "m", allow: "Allow", deny: "Deny", destination: "root@server")
-        for menu in [panel.allowMenu, panel.denyMenu] {
-            XCTAssertFalse(menu.autoenablesItems)
-            XCTAssertTrue(menu.items.allSatisfy(\.isEnabled))
+    func testDurationOnlyAnswersOnButtonAndBothDecisionsUseIt() throws {
+        let choices: [(Int, GrantScope, GrantScope)] = [
+            (0, .once, .once), (1, .fiveMinutes, .denyFiveMinutes),
+            (2, .fifteenMinutes, .denyFifteenMinutes), (3, .day, .denyDay),
+            (4, .custom, .denyCustom)
+        ]
+        for (index, allowScope, denyScope) in choices {
+            for allowed in [false, true] {
+                let panel = ConfirmationPanel(title: "Allow SSH key use?", message: "", allow: "Allow", deny: "Deny", destination: "root @ server")
+                let result = runConfirmation(panel) {
+                    panel.durationPicker.selectItem(at: index)
+                    panel.durationPicker.sendAction(panel.durationPicker.action, to: panel.durationPicker.target)
+                    XCTAssertEqual(panel.scope, .once)
+                    XCTAssertNil(panel.durationMinutes)
+                    panel.customValue.stringValue = "2"
+                    panel.customUnit.selectItem(at: 1)
+                    (allowed ? panel.allowButton : panel.denyButton).performClick(nil)
+                }
+                XCTAssertEqual(result, allowed ? .OK : .cancel)
+                XCTAssertEqual(panel.scope, allowed ? allowScope : denyScope)
+                XCTAssertEqual(panel.durationMinutes, index == 4 ? 120 : nil)
+                let response = Response.confirmation(Confirmation(allowed: allowed, scope: panel.scope, durationMinutes: panel.durationMinutes))
+                XCTAssertEqual(response.answer, allowed ? "yes" : "no")
+                XCTAssertEqual(response.scope, !allowed && index == 0 ? nil : panel.scope)
+                XCTAssertEqual(response.durationMinutes, panel.durationMinutes)
+            }
         }
-        XCTAssertEqual(panel.allowMenu.items.compactMap { $0.representedObject as? String }, ["5m", "15m", "day"])
-        XCTAssertEqual(panel.denyMenu.items.compactMap { $0.representedObject as? String }, ["deny5m", "deny1h"])
     }
 
-    func testSplitButtonsCarryTheirMenusAndOpenOnArrowKey() throws {
-        let panel = ConfirmationPanel(title: "Allow?", message: "m", allow: "Allow", deny: "Deny", destination: "root@server")
-        let allow = try XCTUnwrap(panel.allowButton as? SplitButton)
-        let deny = try XCTUnwrap(panel.denyButton as? SplitButton)
-        // AppKit owns the split: the leading segment sends the action, the
-        // trailing segment shows the menu.
-        XCTAssertEqual(allow.style, .split)
-        XCTAssertEqual(deny.style, .split)
-        XCTAssertTrue(allow.menu === panel.allowMenu)
-        XCTAssertTrue(deny.menu === panel.denyMenu)
-        XCTAssertEqual(allow.title, L10n.string("Allow"))
-        XCTAssertEqual(deny.title, L10n.string("Deny"))
-
-        var opened: [NSMenu] = []
-        allow.menuOpener = { menu, _ in opened.append(menu) }
-        let down = NSEvent.keyEvent(
-            with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
-            characters: "\u{F701}", charactersIgnoringModifiers: "\u{F701}",
-            isARepeat: false, keyCode: 125)!
-        XCTAssertTrue(allow.performKeyEquivalent(with: down))
-        XCTAssertTrue(opened.first === panel.allowMenu)
-        XCTAssertEqual(opened.count, 1)
+    func testInvalidCustomIntervalDoesNotAnswerAndEscapeStillWorks() {
+        for value in ["0", "-1", "1.5", "NaN", "inf", "1441", "99999999999999999999", ""] {
+            let panel = ConfirmationPanel(title: "Allow?", message: "", allow: "Allow", deny: "Deny", destination: "root @ server")
+            let result = runConfirmation(panel) {
+                panel.durationPicker.selectItem(at: 4)
+                panel.durationPicker.sendAction(panel.durationPicker.action, to: panel.durationPicker.target)
+                panel.customValue.stringValue = value
+                panel.allowButton.performClick(nil)
+                XCTAssertEqual(panel.scope, .once)
+                XCTAssertNil(panel.durationMinutes)
+                panel.cancelOperation(nil)
+            }
+            XCTAssertEqual(result, .cancel)
+            XCTAssertEqual(panel.scope, .once)
+            XCTAssertNil(panel.durationMinutes)
+        }
     }
+
 }
 
 @MainActor
@@ -118,4 +130,19 @@ private final class ScopedFakeDialogs: Dialogs {
         if let error { throw error }
         return choice
     }
+}
+
+@MainActor
+func runConfirmation(_ panel: ConfirmationPanel, action: @escaping @MainActor () -> Void) -> NSApplication.ModalResponse {
+    let app = NSApplication.shared
+    DispatchQueue.main.async {
+        action()
+        if let wake = NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [],
+            timestamp: 0, windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0) {
+            app.postEvent(wake, atStart: true)
+        }
+    }
+    let result = app.runModal(for: panel)
+    panel.orderOut(nil)
+    return result
 }

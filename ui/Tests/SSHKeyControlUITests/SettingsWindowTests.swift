@@ -3,9 +3,23 @@ import XCTest
 @testable import SSHKeyControlUI
 
 @MainActor
+private final class SettingsTestNotifications: MonitorNotifications {
+    func permission() async -> MonitorNotificationPermission { .allowed }
+    func requestPermission() async throws -> Bool { throw Failure.denied }
+    func send(id: String, removed: UInt64, failed: UInt64) async throws { throw Failure.denied }
+    func sendTest(id: String) async throws { throw Failure.denied }
+}
+
+@MainActor
 final class SettingsWindowTests: XCTestCase {
     func testSettingsUsesNativeToolbarAndFixedWindow() throws {
-        let controller = SettingsWindowController()
+        let suite = "SettingsWindowTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let monitor = NativeAgentMonitorModel(notifications: SettingsTestNotifications(), defaults: defaults,
+            readPolicy: { NativeMonitorPolicy() }, writePolicy: { _ in XCTFail("layout test changed policy") },
+            readState: { throw CocoaError(.fileNoSuchFile) })
+        let controller = SettingsWindowController(monitor: monitor)
         let window = try XCTUnwrap(controller.window)
         XCTAssertTrue(window.styleMask.contains(.closable))
         XCTAssertFalse(window.styleMask.contains(.resizable))

@@ -3,7 +3,7 @@ import ServiceManagement
 import SwiftUI
 
 enum AgentSetupOperation: Sendable, Equatable {
-    case enable, remove, lifecycle, repair, stopMenu
+    case enable, remove, lifecycle, repair, stopMenu, configMigration, migrateConfig, permissions
     var arguments: [String] {
         switch self {
         case .enable: ["install"]
@@ -11,6 +11,9 @@ enum AgentSetupOperation: Sendable, Equatable {
         case .lifecycle: ["lifecycle", "--json"]
         case .repair: ["repair"]
         case .stopMenu: ["stop-menu"]
+        case .configMigration: ["config-migration", "--json"]
+        case .migrateConfig: ["migrate-config"]
+        case .permissions: ["permissions"]
         }
     }
 }
@@ -52,6 +55,26 @@ enum AgentSetupLocation {
 struct AgentSetupResult: Sendable {
     let succeeded: Bool
     let details: String
+    let mayHaveAppliedChanges: Bool
+
+    init(succeeded: Bool, details: String, mayHaveAppliedChanges: Bool = true) {
+        self.succeeded = succeeded
+        self.details = details
+        self.mayHaveAppliedChanges = mayHaveAppliedChanges
+    }
+}
+
+struct ConfigMigrationStatus: Decodable, Equatable, Sendable {
+    enum State: String, Decodable, Sendable { case none, current, legacy, unknown }
+    let state: State
+    let path: String
+    let backupPath: String?
+    let detail: String?
+
+    enum CodingKeys: String, CodingKey {
+        case state, path, detail
+        case backupPath = "backup_path"
+    }
 }
 
 enum AgentSetupCommand {
@@ -102,9 +125,22 @@ enum AgentSetupCommand {
 final class AgentSetupModel: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var result: AgentSetupResult?
+    @Published private(set) var migrationPrompt: ConfigMigrationStatus?
+    @Published private(set) var unknownConfigPath: String?
     let bundle: URL
+    private let run: (AgentSetupOperation, URL) async -> AgentSetupResult
+    private let approval: () -> LoginItemModel.Approval
+    private let terminate: () -> Void
 
-    init(bundle: URL = Bundle.main.bundleURL) { self.bundle = bundle }
+    init(bundle: URL = Bundle.main.bundleURL,
+         run: @escaping (AgentSetupOperation, URL) async -> AgentSetupResult = { await AgentSetupCommand.run($0, bundle: $1) },
+         approval: @escaping () -> LoginItemModel.Approval = { LoginItemModel.currentApproval() },
+         terminate: @escaping () -> Void = { NSApp.terminate(nil) }) {
+        self.bundle = bundle
+        self.run = run
+        self.approval = approval
+        self.terminate = terminate
+    }
 
     static func blockedByLoginItems(_ operation: AgentSetupOperation, approval: LoginItemModel.Approval) -> Bool {
         operation == .enable && approval.needsApproval
@@ -112,7 +148,11 @@ final class AgentSetupModel: ObservableObject {
 
     func perform(_ operation: AgentSetupOperation) {
         guard !busy else { return }
-        if Self.blockedByLoginItems(operation, approval: LoginItemModel.currentApproval()) {
+        if operation == .enable {
+            Task { await prepareEnable() }
+            return
+        }
+        if Self.blockedByLoginItems(operation, approval: approval()) {
             result = AgentSetupResult(
                 succeeded: false,
                 details: L10n.string("macOS is blocking SSH Key Control in Login Items.")
@@ -122,19 +162,85 @@ final class AgentSetupModel: ObservableObject {
         busy = true
         result = nil
         Task {
-            result = await AgentSetupCommand.run(operation, bundle: bundle)
+            result = await run(operation, bundle)
             busy = false
-            if operation == .enable, result?.succeeded == true {
-                let approval = LoginItemModel.currentApproval()
-                if approval.needsApproval {
-                    result = AgentSetupResult(
-                        succeeded: false,
-                        details: L10n.string("The agent is ready, but macOS requires approval in Login Items before automatic launch works.")
-                    )
-                } else {
-                    NSApp.terminate(nil)
-                }
-            }
+        }
+    }
+
+    func prepareEnable() async {
+        guard !busy else { return }
+        if Self.blockedByLoginItems(.enable, approval: approval()) {
+            result = AgentSetupResult(succeeded: false,
+                                      details: L10n.string("macOS is blocking SSH Key Control in Login Items."),
+                                      mayHaveAppliedChanges: false)
+            return
+        }
+        busy = true
+        result = nil
+        migrationPrompt = nil
+        unknownConfigPath = nil
+        let preflight = await run(.configMigration, bundle)
+        guard preflight.succeeded,
+              let data = preflight.details.data(using: .utf8),
+              let status = try? JSONDecoder().decode(ConfigMigrationStatus.self, from: data) else {
+            busy = false
+            result = AgentSetupResult(succeeded: false,
+                                      details: preflight.details,
+                                      mayHaveAppliedChanges: false)
+            return
+        }
+        switch status.state {
+        case .legacy:
+            migrationPrompt = status
+            busy = false
+        case .unknown:
+            busy = false
+            unknownConfigPath = status.path
+            let detail = status.detail.map { "\n\n" + L10n.string("Technical details:") + " " + $0 } ?? ""
+            result = AgentSetupResult(
+                succeeded: false,
+                details: L10n.format("SSH Key Control cannot update %@ automatically because its managed section does not match a known format. Open the file to review the managed section and restore a trusted backup if needed, then retry.", status.path) + detail,
+                mayHaveAppliedChanges: false
+            )
+        case .none, .current:
+            await runEnable(.enable)
+        }
+    }
+
+    func confirmMigration() {
+        guard migrationPrompt != nil, !busy else { return }
+        migrationPrompt = nil
+        busy = true
+        result = nil
+        Task { await runEnable(.migrateConfig) }
+    }
+
+    func cancelMigration() {
+        migrationPrompt = nil
+        result = AgentSetupResult(succeeded: false,
+                                  details: L10n.string("No settings were changed. You can update the previous SSH settings later."),
+                                  mayHaveAppliedChanges: false)
+    }
+
+    func revealConfig() {
+        guard let path = unknownConfigPath else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+    }
+
+    private func runEnable(_ operation: AgentSetupOperation) async {
+        let commandResult = await run(operation, bundle)
+        result = commandResult
+        busy = false
+        guard commandResult.succeeded else { return }
+        let currentApproval = approval()
+        if currentApproval.needsApproval {
+            result = AgentSetupResult(
+                succeeded: false,
+                details: L10n.string("The agent is ready, but macOS requires approval in Login Items before automatic launch works."),
+                mayHaveAppliedChanges: true
+            )
+        } else {
+            terminate()
         }
     }
 }
@@ -163,7 +269,14 @@ struct AgentSetupView: View {
                 Button(L10n.string("Cancel"), role: .cancel) {}
                 Button(L10n.string("Remove Setup"), role: .destructive) { model.perform(.remove) }
             } message: {
-                Text(L10n.string("First turn off Disable Apple's SSH agent in Advanced settings and complete any requested sign-out. Removing setup stops the protected agent and removes managed SSH settings. Saved passwords and history are kept."))
+                Text(L10n.string("Removing setup stops SSH Key Control and removes its managed SSH settings. Apple's agent and macOS protection are not changed. Saved passwords and history are kept."))
+            }
+            .alert(L10n.string("Update previous SSH settings?"),
+                   isPresented: Binding(get: { model.migrationPrompt != nil }, set: { _ in })) {
+                Button(L10n.string("Cancel"), role: .cancel) { model.cancelMigration() }
+                Button(L10n.string("Update Settings")) { model.confirmMigration() }
+            } message: {
+                Text(L10n.string("Settings from a previous installation were found. To continue, SSH Key Control needs to update its SSH settings. The app will save a backup and preserve your other SSH settings. Updating restarts the agent and clears keys held only in memory."))
             }
             if let result = model.result {
                 Label(result.succeeded ? L10n.string("Completed") : L10n.string("Setup needs attention"),
@@ -175,9 +288,14 @@ struct AgentSetupView: View {
                 if LoginItemModel.currentApproval().needsApproval {
                     Button(L10n.string("Open Login Items…")) { SMAppService.openSystemSettingsLoginItems() }
                 }
+                if model.unknownConfigPath != nil {
+                    Button(L10n.string("Show SSH Config…")) { model.revealConfig() }
+                }
                 if !result.succeeded {
-                    Text(L10n.string("Setup may have applied some changes. Keep the app installed and review the details before retrying."))
-                        .font(.callout).foregroundStyle(.secondary)
+                    if result.mayHaveAppliedChanges {
+                        Text(L10n.string("Setup may have applied some changes. Keep the app installed and review the details before retrying."))
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
                 }
             } else {
                 Text(L10n.string("After enabling, this window closes while launchd takes ownership of the menu bar icon. Reopen terminals to refresh their environment. Keep the app here while the agent is enabled."))
