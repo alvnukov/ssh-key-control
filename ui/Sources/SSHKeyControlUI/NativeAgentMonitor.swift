@@ -3,7 +3,7 @@ import Foundation
 import SwiftUI
 import UserNotifications
 
-enum MonitorNotificationPermission: Equatable {
+enum MonitorNotificationPermission: Equatable, Sendable {
     case notDetermined, denied, allowed
 }
 @MainActor
@@ -25,10 +25,16 @@ final class MacMonitorNotifications: MonitorNotifications {
     func permission() async -> MonitorNotificationPermission {
         let center = UNUserNotificationCenter.current()
         center.delegate = delegate
-        switch await center.notificationSettings().authorizationStatus {
-        case .notDetermined: return .notDetermined
-        case .authorized, .provisional, .ephemeral: return .allowed
-        default: return .denied
+        return await withCheckedContinuation { continuation in
+            center.getNotificationSettings { settings in
+                let permission: MonitorNotificationPermission
+                switch settings.authorizationStatus {
+                case .notDetermined: permission = .notDetermined
+                case .authorized, .provisional, .ephemeral: permission = .allowed
+                default: permission = .denied
+                }
+                continuation.resume(returning: permission)
+            }
         }
     }
     func requestPermission() async throws -> Bool {
