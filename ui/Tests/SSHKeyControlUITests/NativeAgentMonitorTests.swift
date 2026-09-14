@@ -39,6 +39,17 @@ private final class FakeMonitorNotifications: MonitorNotifications {
     }
 }
 
+/// Thread-safe mutable box: injected monitor read closures are @Sendable and
+/// run off the main actor, so shared test state needs locking.
+private final class Mutable<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: T
+    init(_ value: T) { self.value = value }
+    var get: T { lock.lock(); defer { lock.unlock() }; return value }
+    func set(_ value: T) { lock.lock(); defer { lock.unlock() }; self.value = value }
+    func update(_ body: (inout T) -> Void) { lock.lock(); defer { lock.unlock() }; body(&value) }
+}
+
 @MainActor
 final class NativeAgentMonitorTests: XCTestCase {
     private func defaults() -> UserDefaults {
@@ -66,13 +77,14 @@ final class NativeAgentMonitorTests: XCTestCase {
     }
     func testUnansweredPermissionDoesNotFreezeHealthOrOptOut() async {
         let center = FakeMonitorNotifications(); center.holdPermission = true
-        var policy = NativeMonitorPolicy()
-        let model = NativeAgentMonitorModel(notifications: center, defaults: defaults(), readPolicy: { policy }, readState: {
-            NativeMonitorState(enabled: policy.enabled, session: "session", checkedAt: Date(), status: policy.enabled ? "clear" : "disabled", removed: 0, failed: 0)
+        let policy = Mutable(NativeMonitorPolicy())
+        let model = NativeAgentMonitorModel(notifications: center, defaults: defaults(), readPolicy: { policy.get }, readState: {
+            let current = policy.get
+            return NativeMonitorState(enabled: current.enabled, session: "session", checkedAt: Date(), status: current.enabled ? "clear" : "disabled", removed: 0, failed: 0)
         })
         await model.refresh()
         await center.waitUntilPermissionRequested()
-        policy.enabled = false
+        policy.update { $0.enabled = false }
         await model.refresh()
         XCTAssertFalse(model.enabled)
         XCTAssertEqual(model.title, L10n.string("Monitoring is off"))
@@ -93,13 +105,13 @@ final class NativeAgentMonitorTests: XCTestCase {
     func testAuthorizedNotificationsAggregateAndCursorSurvivesRestart() async {
         let center = FakeMonitorNotifications(); center.status = .allowed
         let stored = defaults()
-        var removed: UInt64 = 1
-        let read = { NativeMonitorState(enabled: true, session: "session", checkedAt: Date(), status: "clear", removed: removed, failed: 0) }
+        let removed = Mutable<UInt64>(1)
+        let read: @Sendable () throws -> NativeMonitorState = { NativeMonitorState(enabled: true, session: "session", checkedAt: Date(), status: "clear", removed: removed.get, failed: 0) }
         let model = NativeAgentMonitorModel(notifications: center, defaults: stored, readPolicy: { NativeMonitorPolicy() }, readState: read)
         let now = Date()
         await model.refresh(now: now)
         XCTAssertEqual(center.delivered.count, 1)
-        removed = 4
+        removed.set(4)
         await model.refresh(now: now.addingTimeInterval(2))
         XCTAssertEqual(center.delivered.count, 1)
         await model.refresh(now: now.addingTimeInterval(31))
@@ -136,19 +148,19 @@ final class NativeAgentMonitorTests: XCTestCase {
         let stored = defaults()
         let cursor = Data("saved-real-event-cursor".utf8)
         stored.set(cursor, forKey: "nativeAgentMonitor.notificationCursor")
-        var reads = 0
+        let reads = Mutable(0)
         let model = NativeAgentMonitorModel(notifications: center, defaults: stored,
             readPolicy: { NativeMonitorPolicy(enabled: false) },
             writePolicy: { _ in XCTFail("notification test wrote monitoring policy") },
-            readState: { reads += 1; throw CocoaError(.fileNoSuchFile) })
+            readState: { reads.update { $0 += 1 }; throw CocoaError(.fileNoSuchFile) })
         await model.refresh()
         XCTAssertFalse(model.enabled)
-        let readsBefore = reads
+        let readsBefore = reads.get
         await model.sendTestNotification()
         XCTAssertEqual(center.testIDs.count, 1)
         XCTAssertEqual(center.attempts, 0)
         XCTAssertEqual(center.requests, 0)
-        XCTAssertEqual(reads, readsBefore)
+        XCTAssertEqual(reads.get, readsBefore)
         XCTAssertEqual(stored.data(forKey: "nativeAgentMonitor.notificationCursor"), cursor)
         XCTAssertNotNil(model.testNotificationFeedback)
         XCTAssertFalse(model.testNotificationFailed)

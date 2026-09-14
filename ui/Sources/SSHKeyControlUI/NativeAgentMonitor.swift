@@ -109,6 +109,18 @@ struct MonitorNotificationCursor: Codable, Equatable {
     var failed: UInt64 = 0
 }
 
+/// Snapshot of the on-disk monitoring policy and agent journal state.
+private struct NativeMonitorSnapshot: Sendable {
+    let policy: NativeMonitorPolicy
+    let state: NativeMonitorState?
+
+    static func load(readPolicy: @Sendable () throws -> NativeMonitorPolicy,
+                     readState: @Sendable () throws -> NativeMonitorState) throws -> NativeMonitorSnapshot {
+        let policy = try readPolicy()
+        return NativeMonitorSnapshot(policy: policy, state: try? readState())
+    }
+}
+
 @MainActor
 final class NativeAgentMonitorModel: ObservableObject {
     static let shared = NativeAgentMonitorModel()
@@ -124,9 +136,9 @@ final class NativeAgentMonitorModel: ObservableObject {
     private var testFeedbackTask: Task<Void, Never>?
     private let notifications: any MonitorNotifications
     private let defaults: UserDefaults
-    private let readPolicy: () throws -> NativeMonitorPolicy
+    private let readPolicy: @Sendable () throws -> NativeMonitorPolicy
     private let writePolicy: (NativeMonitorPolicy) throws -> Void
-    private let readState: () throws -> NativeMonitorState
+    private let readState: @Sendable () throws -> NativeMonitorState
     private var task: Task<Void, Never>?
     private var refreshing = false
     private var requestedPermission = false
@@ -136,9 +148,9 @@ final class NativeAgentMonitorModel: ObservableObject {
     private static let cursorKey = "nativeAgentMonitor.notificationCursor"
 
     init(notifications: any MonitorNotifications = MacMonitorNotifications(), defaults: UserDefaults = .standard,
-         readPolicy: @escaping () throws -> NativeMonitorPolicy = { try NativeMonitorFiles.policy() },
+         readPolicy: @escaping @Sendable () throws -> NativeMonitorPolicy = { try NativeMonitorFiles.policy() },
          writePolicy: @escaping (NativeMonitorPolicy) throws -> Void = { try NativeMonitorFiles.save($0) },
-         readState: @escaping () throws -> NativeMonitorState = { try NativeMonitorFiles.state() }) {
+         readState: @escaping @Sendable () throws -> NativeMonitorState = { try NativeMonitorFiles.state() }) {
         self.notifications = notifications; self.defaults = defaults
         self.readPolicy = readPolicy; self.writePolicy = writePolicy; self.readState = readState
         cursor = defaults.data(forKey: Self.cursorKey).flatMap { try? JSONDecoder().decode(MonitorNotificationCursor.self, from: $0) }
@@ -166,9 +178,18 @@ final class NativeAgentMonitorModel: ObservableObject {
         guard !refreshing else { return }
         refreshing = true
         defer { refreshing = false }
-        do { enabled = try readPolicy().enabled; error = nil }
-        catch { self.error = L10n.string("The monitoring setting could not be read."); state = nil; return }
-        state = try? readState()
+        // Reads touch the filesystem and refresh runs every 2 s; keep them off the main actor.
+        let snapshot: NativeMonitorSnapshot
+        do {
+            let readPolicy = self.readPolicy, readState = self.readState
+            snapshot = try await Task.detached(priority: .utility) {
+                try NativeMonitorSnapshot.load(readPolicy: readPolicy, readState: readState)
+            }.value
+        } catch {
+            self.error = L10n.string("The monitoring setting could not be read."); state = nil; return
+        }
+        enabled = snapshot.policy.enabled; error = nil
+        state = snapshot.state
         notificationPermission = await notifications.permission()
         guard enabled else { if let state { acknowledge(state) }; return }
         if notificationPermission == .notDetermined && !requestedPermission {
