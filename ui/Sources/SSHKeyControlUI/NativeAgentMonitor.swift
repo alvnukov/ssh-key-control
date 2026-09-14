@@ -26,7 +26,9 @@ final class MacMonitorNotifications: MonitorNotifications {
         let center = UNUserNotificationCenter.current()
         center.delegate = delegate
         return await withCheckedContinuation { continuation in
-            center.getNotificationSettings { settings in
+            // Runs on a private queue: @Sendable keeps the closure off the main actor,
+            // otherwise Swift 6 traps on the isolation check before reading the settings.
+            center.getNotificationSettings { @Sendable settings in
                 let permission: MonitorNotificationPermission
                 switch settings.authorizationStatus {
                 case .notDetermined: permission = .notDetermined
