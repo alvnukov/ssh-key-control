@@ -73,7 +73,7 @@ func TestKnownHostNamesExclusionsAndErrors(t *testing.T) {
 	for _, tc := range []struct{ name, hosts, config, want string }{
 		{"revoked and CA", "@revoked revoked.example " + entry + "\n@cert-authority ca.example " + entry + "\n" + good, "", "ok.example"},
 		{"unsafe names", "evil\x1b.example,bidi\u202e.example,*.example,!no.example " + entry + "\n" + good, "", "ok.example"},
-		{"malformed known hosts", good + "broken\n", "", ""},
+		{"malformed known hosts", good + "broken\n", "", "ok.example"},
 		{"long known hosts line", good + "#" + strings.Repeat("x", 65536), "", ""},
 		{"large known hosts file", good + strings.Repeat("#\n", 2<<20), "", ""},
 		{"long config line", good, "#" + strings.Repeat("x", 65536), ""},

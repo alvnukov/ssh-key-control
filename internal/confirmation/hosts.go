@@ -54,7 +54,9 @@ func KnownHostNames(fingerprint string, knownHostsPath, configPath string) strin
 		}
 		marker, hosts, key, _, _, err := ssh.ParseKnownHosts(line)
 		if err != nil {
-			return ""
+			// Informational listing only: skip unparsable lines instead of
+			// hiding every name because of one foreign or corrupt entry.
+			continue
 		}
 		if marker != "" || ssh.FingerprintSHA256(key) != fingerprint {
 			continue
