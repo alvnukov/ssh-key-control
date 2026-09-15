@@ -98,26 +98,56 @@ done:
 */
 import "C"
 
-import "net"
+import (
+	"net"
+	"unsafe"
+
+	"github.com/alvnukov/ssh-key-control/internal/proc"
+)
+
+// peerToken asks the kernel who holds the other end of the socket. Everything
+// this file knows about a client starts here: nothing is taken from an agent
+// message, a process name, a PID on its own, or a self-reported flag.
+func peerToken(conn net.Conn) (C.audit_token_t, bool) {
+	var token C.audit_token_t
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		return token, false
+	}
+	raw, err := unixConn.SyscallConn()
+	if err != nil {
+		return token, false
+	}
+	var captured C.int
+	if err := raw.Control(func(fd uintptr) {
+		captured = C.skc_peer_token(C.int(fd), &token)
+	}); err != nil || captured == 0 {
+		return token, false
+	}
+	return token, true
+}
 
 // trustedLocalSSH checks the live peer rather than trusting a process name,
 // executable path, PID alone, or a client's self-reported forwarding flag.
 // Failure to attest leaves ordinary publickey requests strictly one-shot.
 func trustedLocalSSH(conn net.Conn) bool {
-	unixConn, ok := conn.(*net.UnixConn)
+	token, ok := peerToken(conn)
 	if !ok {
 		return false
 	}
-	raw, err := unixConn.SyscallConn()
-	if err != nil {
-		return false
-	}
-	var token C.audit_token_t
-	var captured C.int
-	if err := raw.Control(func(fd uintptr) {
-		captured = C.skc_peer_token(C.int(fd), &token)
-	}); err != nil || captured == 0 {
-		return false
-	}
 	return C.skc_trusted_ssh(&token) != 0
+}
+
+// peerProcessChain names the client and its ancestors, so that a temporary
+// decision can belong to the shell or application that asked for it instead of
+// to everything running as this user. An unreadable peer yields an empty
+// chain, which leaves the request unanchored rather than anchored to a guess.
+func peerProcessChain(conn net.Conn) proc.Chain {
+	token, ok := peerToken(conn)
+	if !ok {
+		return proc.Chain{}
+	}
+	// The token is handed on whole rather than picked apart here: reading a
+	// process out of it belongs with everything else that reads processes.
+	return proc.ResolveToken(C.GoBytes(unsafe.Pointer(&token), C.int(unsafe.Sizeof(token))))
 }

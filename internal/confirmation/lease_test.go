@@ -28,7 +28,7 @@ func TestExplicitGrants(t *testing.T) {
 			target := &confirmation.Destination{Host: "host", User: "alice", HostKey: "SHA256:server"}
 			check := func(key string, dest *confirmation.Destination) {
 				t.Helper()
-				if allowed, err := a.Authorize(context.Background(), key, "key comment", dest); err != nil || !allowed {
+				if allowed, err := a.Authorize(context.Background(), key, "key comment", dest, nil); err != nil || !allowed {
 					t.Fatalf("Authorize: %t %v", allowed, err)
 				}
 			}
@@ -75,7 +75,7 @@ func TestDeniedOrInvalidGrantNeverCaches(t *testing.T) {
 		d := &scopedDialogs{dialogs: dialogs{allowed: allowed}, scope: "invalid"}
 		a := confirmation.New(d, time.Now)
 		for range 2 {
-			ok, _ := a.Authorize(context.Background(), "SHA256:key", "", &confirmation.Destination{User: "u", HostKey: "SHA256:server"})
+			ok, _ := a.Authorize(context.Background(), "SHA256:key", "", &confirmation.Destination{User: "u", HostKey: "SHA256:server"}, nil)
 			if ok {
 				t.Fatal("denied or invalid choice authorized signing")
 			}
@@ -94,14 +94,14 @@ func TestDayGrantUsesCalendarMidnight(t *testing.T) {
 	d := &scopedDialogs{dialogs: dialogs{allowed: true}, scope: ui.GrantDay}
 	a := confirmation.New(d, func() time.Time { return now })
 	target := &confirmation.Destination{User: "u", HostKey: "SHA256:server"}
-	a.Authorize(context.Background(), "SHA256:key", "", target)
+	a.Authorize(context.Background(), "SHA256:key", "", target, nil)
 	now = time.Date(2026, 3, 8, 23, 59, 59, 0, location)
-	a.Authorize(context.Background(), "SHA256:key", "", target)
+	a.Authorize(context.Background(), "SHA256:key", "", target, nil)
 	if d.calls != 1 {
 		t.Fatal("day grant expired before local midnight")
 	}
 	now = now.Add(time.Second)
-	a.Authorize(context.Background(), "SHA256:key", "", target)
+	a.Authorize(context.Background(), "SHA256:key", "", target, nil)
 	if d.calls != 2 {
 		t.Fatal("day grant survived DST midnight")
 	}
@@ -120,11 +120,14 @@ func TestDenyDurationsSilenceRepeatPrompts(t *testing.T) {
 			d := &scopedDialogs{dialogs: dialogs{allowed: false}, scope: tc.scope}
 			a := confirmation.New(d, func() time.Time { return now })
 			target := &confirmation.Destination{Host: "host", User: "alice", HostKey: "SHA256:server"}
-			if ok, err := a.Authorize(context.Background(), "SHA256:key", "", target); err != nil || ok {
+			// The refusal is kept for the shell that asked, so the repeats
+			// have to come from that same shell to be answered from it.
+			who := caller(session(firstTestPID, firstTestPID+1))
+			if ok, err := a.Authorize(context.Background(), "SHA256:key", "", target, who); err != nil || ok {
 				t.Fatalf("first deny: %t %v", ok, err)
 			}
 			for range 2 {
-				ok, err := a.Authorize(context.Background(), "SHA256:key", "", target)
+				ok, err := a.Authorize(context.Background(), "SHA256:key", "", target, who)
 				if err != nil || ok {
 					t.Fatalf("during lease: %t %v", ok, err)
 				}
@@ -134,16 +137,16 @@ func TestDenyDurationsSilenceRepeatPrompts(t *testing.T) {
 			}
 			other := *target
 			other.User = "root"
-			a.Authorize(context.Background(), "SHA256:key", "", &other)
+			a.Authorize(context.Background(), "SHA256:key", "", &other, who)
 			other = *target
 			other.HostKey = "SHA256:other-server"
-			a.Authorize(context.Background(), "SHA256:key", "", &other)
-			a.Authorize(context.Background(), "SHA256:other-key", "", target)
+			a.Authorize(context.Background(), "SHA256:key", "", &other, who)
+			a.Authorize(context.Background(), "SHA256:other-key", "", target, nil)
 			if d.calls != 4 {
 				t.Fatalf("denial leaked across keys, users or servers: %d dialogs", d.calls)
 			}
 			now = now.Add(tc.wait)
-			ok, err := a.Authorize(context.Background(), "SHA256:key", "", target)
+			ok, err := a.Authorize(context.Background(), "SHA256:key", "", target, nil)
 			if err != nil || ok {
 				t.Fatalf("after expiry: %t %v", ok, err)
 			}
@@ -159,7 +162,7 @@ func TestPlainDenyAndUnverifiedDestinationNeverSilence(t *testing.T) {
 	a := confirmation.New(d, time.Now)
 	target := &confirmation.Destination{Host: "host", User: "alice", HostKey: "SHA256:server"}
 	for range 2 {
-		if ok, err := a.Authorize(context.Background(), "SHA256:key", "", target); err != nil || ok {
+		if ok, err := a.Authorize(context.Background(), "SHA256:key", "", target, nil); err != nil || ok {
 			t.Fatalf("plain deny: %t %v", ok, err)
 		}
 	}
@@ -167,7 +170,7 @@ func TestPlainDenyAndUnverifiedDestinationNeverSilence(t *testing.T) {
 		t.Fatal("plain denial was remembered")
 	}
 	for range 2 {
-		if ok, err := a.Authorize(context.Background(), "SHA256:key", "", nil); err != nil || ok {
+		if ok, err := a.Authorize(context.Background(), "SHA256:key", "", nil, nil); err != nil || ok {
 			t.Fatalf("unverified deny: %t %v", ok, err)
 		}
 	}

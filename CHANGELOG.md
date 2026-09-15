@@ -28,6 +28,27 @@ Initial version.
 - Bound concurrent agent connections, frame sizes, pipelining and partial I/O.
 - Require hostbound signed server identity for timed grants and denials;
   ordinary publickey requests remain one-shot.
+- Show the calling process chain in the confirmation dialog and tie a timed
+  decision to the ancestor it is drawn at, so it covers that program and
+  everything it starts instead of every program running as this user. A refusal
+  obeys the same line: it silences the program it was drawn at — and everything
+  started from it, with no further dialog and no notification — instead of the
+  user's own next connection, and outranks approvals held below it. A refusal
+  that could not be attached to any program answers one request and is gone.
+  Temporary Decisions lists and revokes by program.
+- Manage keys from the menu bar: one item says how many keys the agent holds
+  and opens a window listing every key this Mac knows about — the private keys
+  in `~/.ssh`, the `IdentityFile` entries of `~/.ssh/config`, files added by
+  hand, and keys the agent holds whose file is not here. A switch per row loads
+  that one key or takes it back out, a checkbox marks a key to be loaded when
+  the menu bar app starts (only into an agent holding nothing, and saying so
+  when it has no remembered passphrase), and each row shows whether its
+  passphrase is in the keychain and can forget it. Backed by
+  `ssh-key-control keys load|unload|list`, which now lists the keys on disk
+  beside the ones in the agent and unloads by fingerprint. Loading runs
+  OpenSSH's `ssh-add` against the protected socket with this program as its
+  `SSH_ASKPASS`, skips the keys the agent already holds, and waits as long as a
+  passphrase takes to type.
 - Configurable Return/keypad Enter action with a visible matching default;
   Escape always denies.
 - Do not include malformed UI responses in errors, which could expose secrets.

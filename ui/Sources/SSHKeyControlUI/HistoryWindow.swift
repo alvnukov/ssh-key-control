@@ -114,6 +114,7 @@ private struct EventDetails: View {
                 }
                 field(L10n.string("Decision source"), event.source == "management" ? L10n.string("Management") : (event.source == "cached" ? L10n.string("Previously remembered decision") : L10n.string("Confirmation dialog")))
                 field(L10n.string("Scope"), scopeName(event.scope))
+                if event.scope != "once" { field(L10n.string("Program"), event.programLabel) }
                 if let expiry = event.expiresAt {
                     field(L10n.string("Expiry recorded at this decision"), expiry.formatted(date: .abbreviated, time: .standard))
                 }
@@ -134,6 +135,7 @@ private struct EventDetails: View {
         case "5m": L10n.string("Allow for 5 minutes")
         case "15m": L10n.string("Allow for 15 minutes")
         case "day": L10n.string("Allow until end of local day")
+        case "process": L10n.string("Allow while the program runs")
         case "deny5m": L10n.string("Deny for 5 minutes")
         case "deny1h": L10n.string("Deny for 1 hour")
         case "deny15m": L10n.string("Deny for 15 minutes")

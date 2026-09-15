@@ -16,6 +16,13 @@ import (
 	sshagent "golang.org/x/crypto/ssh/agent"
 )
 
+// stated is everything a signing request says about the key and where the
+// signature is going. It leaves out Caller, which is a live kernel lookup
+// rather than part of the request, and which makes the struct uncomparable.
+func stated(req protected.SigningRequest) [4]string {
+	return [4]string{req.Fingerprint, req.Comment, req.User, req.HostKey}
+}
+
 type protectedRecorder struct {
 	mu       sync.Mutex
 	requests []protected.SigningRequest
@@ -109,7 +116,7 @@ func TestProtectedEverySignatureRequiresConfirmation(t *testing.T) {
 				}
 				want := protected.SigningRequest{Fingerprint: ssh.FingerprintSHA256(signer.PublicKey()), Comment: comment}
 				for _, req := range requests {
-					if req != want {
+					if stated(req) != stated(want) {
 						t.Errorf("request = %+v, want %+v", req, want)
 					}
 				}
@@ -183,7 +190,7 @@ func TestProtectedVerifiedDestination(t *testing.T) {
 				t.Fatalf("got %d callbacks", len(requests))
 			}
 			for _, req := range requests {
-				if req != want {
+				if stated(req) != stated(want) {
 					t.Errorf("request = %+v, want %+v", req, want)
 				}
 			}

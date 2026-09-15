@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 
+	"github.com/alvnukov/ssh-key-control/internal/proc"
 	"golang.org/x/crypto/ssh"
 	sshagent "golang.org/x/crypto/ssh/agent"
 )
@@ -16,6 +17,12 @@ import (
 // Comment is untrusted metadata, not an identity or destination.
 type SigningRequest struct {
 	Fingerprint, Comment, User, HostKey string
+	// Caller reads the client's live process ancestry from the kernel, so a
+	// temporary decision can belong to the program that asked rather than to
+	// the whole machine. It is a function because the answer is only true at
+	// the moment it is asked, and the callback asks more than once. It is nil
+	// when there is no attested peer to read.
+	Caller func() proc.Chain
 }
 
 // Protected owns an in-memory keyring with no ungated signing interface.
@@ -59,6 +66,7 @@ func (p *Protected) Serve(ctx context.Context, conn net.Conn) error {
 	defer func() { cancel(); conn.Close(); <-done }()
 	return sshagent.ServeAgent(&protectedConnection{owner: p, ctx: ctx,
 		trustedLocal: func() bool { return trustedLocalSSH(conn) },
+		caller:       func() proc.Chain { return peerProcessChain(conn) },
 	}, transport)
 }
 
@@ -70,6 +78,7 @@ type protectedConnection struct {
 	binding      *protectedBinding
 	tainted      bool
 	trustedLocal func() bool
+	caller       func() proc.Chain
 }
 
 type protectedBinding struct {
@@ -126,7 +135,7 @@ func (c *protectedConnection) SignWithFlags(key ssh.PublicKey, data []byte, flag
 		if err != nil {
 			return nil, err
 		}
-		req := SigningRequest{Fingerprint: ssh.FingerprintSHA256(actual), Comment: candidate.Comment}
+		req := SigningRequest{Fingerprint: ssh.FingerprintSHA256(actual), Comment: candidate.Comment, Caller: c.caller}
 		var localOnly bool
 		req.User, req.HostKey, localOnly = c.destination(actual, data)
 		allowed, err := c.owner.confirm(c.ctx, req)

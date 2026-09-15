@@ -41,6 +41,18 @@ public struct Keychain: SecretStore {
         guard added == errSecSuccess else { throw Self.failure(added, "storing") }
     }
 
+    /// Whether a passphrase for this account is remembered. This asks for the
+    /// item's attributes and not for the secret itself, which the keychain
+    /// answers from its own index: no macOS prompt, so a window can show a
+    /// column of these without asking permission once per row.
+    public func remembers(account: String) -> Bool {
+        var query = base(account)
+        query[kSecReturnAttributes] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        return SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess
+    }
+
     public func delete(account: String) throws {
         let status = SecItemDelete(base(account) as CFDictionary)
         guard status == errSecSuccess else { throw Self.failure(status, "deleting") }

@@ -47,6 +47,12 @@ type Event struct {
 	User            string     `json:"user,omitempty"`
 	Scope           string     `json:"scope,omitempty"`
 	ExpiresAt       *time.Time `json:"expiresAt,omitempty"`
+	// Process names the program a timed decision was tied to, with the PID
+	// and PID version of the run it belonged to. They say which program held
+	// a decision, long after that program has gone.
+	Process        string `json:"process,omitempty"`
+	ProcessPID     int32  `json:"processPid,omitempty"`
+	ProcessVersion uint32 `json:"processVersion,omitempty"`
 }
 type Document struct {
 	Version int     `json:"version"`
@@ -155,6 +161,7 @@ func (s *Store) Record(event Event) error {
 	event.ID = s.next
 	event.Time = now.UTC()
 	event.User = boundedLabel(event.User)
+	event.Process = boundedLabel(event.Process)
 	s.events = append(kept, event)
 	if len(s.events) > policy.MaxEvents {
 		s.events = append([]Event(nil), s.events[len(s.events)-policy.MaxEvents:]...)

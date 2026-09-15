@@ -43,6 +43,20 @@ type TextRequest struct {
 	Placeholder string
 }
 
+// ProcessLink is one process in the chain that asked for a signature, as it
+// is shown to the user. Every field describes; none of them authorizes.
+type ProcessLink struct {
+	// Name and PID are always shown together: a name alone says nothing about
+	// which of several copies of a program is asking.
+	Name string `json:"name"`
+	PID  int32  `json:"pid"`
+	// Team is the signing team of a process macOS could vouch for. Verified
+	// is false when no signature could be read, which the dialog marks: it is
+	// ordinary for a self-updating program, and worth seeing either way.
+	Team     string `json:"team,omitempty"`
+	Verified bool   `json:"verified,omitempty"`
+}
+
 // ConfirmRequest asks a yes/no question. Deny is the default answer.
 type ConfirmRequest struct {
 	Title   string
@@ -51,6 +65,12 @@ type ConfirmRequest struct {
 	Deny    string
 	// Destination enables timed choices only when nonempty.
 	Destination string
+	// Chain is the caller's process ancestry, nearest first, and Boundary
+	// indexes the link a timed decision would attach to. The user may move
+	// the boundary further up the chain, never below it: a decision anchored
+	// below the proposed link would be dead before it was stored.
+	Chain    []ProcessLink
+	Boundary int
 }
 
 // GrantScope is the lifetime selected for a confirmation: how long an
@@ -62,17 +82,28 @@ const (
 	Grant5Minutes  GrantScope = "5m"
 	Grant15Minutes GrantScope = "15m"
 	GrantDay       GrantScope = "day" // Until the end of the local day.
-	Deny5Minutes   GrantScope = "deny5m"
-	Deny1Hour      GrantScope = "deny1h" // Kept for older helpers.
-	Deny15Minutes  GrantScope = "deny15m"
-	DenyDay        GrantScope = "denyday"
-	GrantCustom    GrantScope = "custom"
-	DenyCustom     GrantScope = "denycustom"
+	// GrantProcess lasts while the process the decision is anchored to keeps
+	// running, and no longer than a day whatever happens.
+	GrantProcess  GrantScope = "process"
+	Deny5Minutes  GrantScope = "deny5m"
+	Deny1Hour     GrantScope = "deny1h" // Kept for older helpers.
+	Deny15Minutes GrantScope = "deny15m"
+	DenyDay       GrantScope = "denyday"
+	// DenyProcess is the refusal that lasts while the program it was drawn
+	// at keeps running: the answer to something that asks in a loop.
+	DenyProcess GrantScope = "denyprocess"
+	GrantCustom GrantScope = "custom"
+	DenyCustom  GrantScope = "denycustom"
 )
+
+// IsProcessLifetime reports whether the scope is measured against the program
+// the decision is drawn at, rather than against the clock.
+func (s GrantScope) IsProcessLifetime() bool { return s == GrantProcess || s == DenyProcess }
 
 // IsDenyDuration reports whether the scope extends a refusal, not a grant.
 func (s GrantScope) IsDenyDuration() bool {
-	return s == Deny5Minutes || s == Deny1Hour || s == Deny15Minutes || s == DenyDay || s == DenyCustom
+	return s == Deny5Minutes || s == Deny1Hour || s == Deny15Minutes || s == DenyDay ||
+		s == DenyProcess || s == DenyCustom
 }
 
 // Confirmation carries a decision; for a denial the Scope matters only when
@@ -81,6 +112,11 @@ type Confirmation struct {
 	Allowed         bool
 	Scope           GrantScope
 	DurationMinutes int // Only custom scopes; 1..1440. Zero means absent.
+	// Boundary is the link the user settled on, an index into the chain they
+	// were shown. A real boundary is never the caller itself, so zero means
+	// the user left the proposed one alone, which is also what a helper that
+	// knows nothing of process chains sends.
+	Boundary int
 }
 
 // ScopedDialogs offers confirmation lifetimes without changing legacy Dialogs.

@@ -15,7 +15,7 @@ func (c *Client) ManageDecisions(ctx context.Context, decisions []ui.TemporaryDe
 	if err != nil {
 		return ui.DecisionChange{}, err
 	}
-	if resp.Change == nil || resp.Answer != "" || resp.Remember || resp.Scope != nil || resp.DurationMinutes != nil {
+	if resp.Change == nil || resp.Answer != "" || resp.Remember || resp.Scope != nil || resp.DurationMinutes != nil || resp.Boundary != nil {
 		return ui.DecisionChange{}, errors.New("helper returned an invalid management action")
 	}
 	change := *resp.Change
@@ -24,7 +24,9 @@ func (c *Client) ManageDecisions(ctx context.Context, decisions []ui.TemporaryDe
 		if change.ID != "" || change.Minutes != 0 || change.EndOfDay {
 			return ui.DecisionChange{}, errors.New("management action has unexpected fields")
 		}
-	case "revoke", "update":
+	// Revoking by process still names one row. Which other rows go with it is
+	// the agent's answer, from the anchor it stored, not the window's.
+	case "revoke", "revoke-process", "update":
 		if change.ID == "" || len(change.ID) > 128 {
 			return ui.DecisionChange{}, errors.New("management action needs an existing decision ID")
 		}

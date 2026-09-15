@@ -72,6 +72,12 @@ func fakeHelper() {
 			if req["title"] == "empty scope" {
 				resp["scope"] = ""
 			}
+			if title, _ := req["title"].(string); strings.HasPrefix(title, "boundary ") {
+				answerBoundary(req, resp, strings.TrimPrefix(title, "boundary "))
+			}
+			if req["title"] == "legacy" && req["boundary"] != nil {
+				resp = map[string]any{"ok": false, "error": "legacy was offered a boundary"}
+			}
 			if req["title"] == "scoped" {
 				if req["destination"] != "alice@production" {
 					resp = map[string]any{"ok": false, "error": "missing destination"}
@@ -105,6 +111,42 @@ func fakeHelper() {
 		if err := out.Encode(resp); err != nil {
 			os.Exit(2)
 		}
+	}
+}
+
+// answerBoundary plays a helper that reports where the user left the boundary,
+// including the places a well-behaved one would never put it.
+func answerBoundary(req, resp map[string]any, kind string) {
+	chain, _ := req["chain"].([]any)
+	proposed, _ := req["boundary"].(float64)
+	if scope, ok := req["message"].(string); ok && scope != "" {
+		resp["scope"] = scope
+	}
+	switch kind {
+	case "echo":
+		if len(chain) != 3 {
+			clear(resp)
+			resp["ok"], resp["error"] = false, "the chain never arrived"
+			return
+		}
+		resp["boundary"] = proposed
+	case "widen":
+		resp["boundary"] = proposed + 1
+	case "below":
+		resp["boundary"] = proposed - 1
+	case "offchain":
+		resp["boundary"] = float64(len(chain))
+	case "unasked":
+		resp["boundary"] = 1
+	case "denied":
+		resp["answer"] = "no"
+		resp["boundary"] = proposed
+	case "denied widen":
+		resp["answer"] = "no"
+		resp["boundary"] = proposed + 1
+	case "denied offchain":
+		resp["answer"] = "no"
+		resp["boundary"] = float64(len(chain))
 	}
 }
 

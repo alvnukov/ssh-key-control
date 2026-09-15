@@ -47,9 +47,12 @@ func TestSymmetricDurationsExpireAndStayBoundToExactTuple(t *testing.T) {
 			d := &durationDialogs{dialogs: dialogs{allowed: allowed}, choice: ui.Confirmation{Allowed: allowed, Scope: scope, DurationMinutes: tc.minutes}}
 			a := confirmation.New(d, func() time.Time { return now })
 			target := &confirmation.Destination{Host: "host", User: "alice", HostKey: "SHA256:host"}
+			// Both directions are kept for the program that asked, so the
+			// caller is a real session rather than nobody in particular.
+			who := caller(session(firstTestPID, firstTestPID+1))
 			check := func(key string, dest *confirmation.Destination) {
 				t.Helper()
-				got, e := a.Authorize(context.Background(), key, "", dest)
+				got, e := a.Authorize(context.Background(), key, "", dest, who)
 				if e != nil || got != allowed {
 					t.Fatalf("%+v: got %v %v", d.choice, got, e)
 				}
@@ -101,8 +104,9 @@ func TestInvalidCustomDurationNeverCreatesLease(t *testing.T) {
 		for _, minutes := range []int{-1, 0, 1441, math.MaxInt} {
 			d := &durationDialogs{choice: ui.Confirmation{Allowed: allowed, Scope: scope, DurationMinutes: minutes}}
 			a := confirmation.New(d, time.Now)
+			who := caller(session(firstTestPID, firstTestPID+1))
 			for range 2 {
-				got, err := a.Authorize(context.Background(), "SHA256:key", "", &confirmation.Destination{User: "alice", HostKey: "SHA256:host"})
+				got, err := a.Authorize(context.Background(), "SHA256:key", "", &confirmation.Destination{User: "alice", HostKey: "SHA256:host"}, who)
 				if got || err == nil {
 					t.Fatalf("invalid duration accepted: %+v %v", d.choice, err)
 				}

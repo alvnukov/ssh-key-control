@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alvnukov/ssh-key-control/internal/proc"
 	"github.com/alvnukov/ssh-key-control/internal/ui"
 )
 
@@ -14,6 +15,20 @@ type temporaryDecision struct {
 	id, host string
 	allowed  bool
 	expires  time.Time
+	// anchor is the process this decision was granted to, kept so the window
+	// can name it and so that revoking one row can find its siblings. A zero
+	// anchor belongs to the decisions that were never tied to a program.
+	anchor proc.Link
+}
+
+// anchorName is what a person would recognize: the executable if the kernel
+// still knows it, the short command name otherwise, nothing when the decision
+// is not anchored at all.
+func (d temporaryDecision) anchorName() string {
+	if d.anchor.PID == 0 {
+		return ""
+	}
+	return clean(d.anchor.Display())
 }
 
 type decisionStore struct {
@@ -39,6 +54,10 @@ func (s *decisionStore) lookup(key grantKey) (temporaryDecision, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.prune()
+	// An anchored decision needs no liveness check of its own. Its key holds
+	// the fingerprint of a chain of processes, and the caller's key is built
+	// by walking live processes upward, so a dead ancestor simply stops being
+	// found: the decision expires with the program it was given to.
 	item, ok := s.items[key]
 	return item, ok
 }
@@ -64,7 +83,7 @@ func decisionExpiry(now time.Time, choice ui.Confirmation) (time.Time, error) {
 	return time.Time{}, nil
 }
 
-func (s *decisionStore) remember(key grantKey, host string, choice ui.Confirmation) (time.Time, error) {
+func (s *decisionStore) remember(key grantKey, host string, anchor proc.Link, choice ui.Confirmation) (time.Time, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.items, key)
@@ -73,7 +92,7 @@ func (s *decisionStore) remember(key grantKey, host string, choice ui.Confirmati
 		return time.Time{}, err
 	}
 	if !until.IsZero() {
-		s.items[key] = temporaryDecision{rand.Text(), clean(host), choice.Allowed, until}
+		s.items[key] = temporaryDecision{rand.Text(), clean(host), choice.Allowed, until, anchor}
 	}
 	return until, nil
 }
@@ -85,11 +104,16 @@ func (a *Authorizer) TemporaryDecisions() []ui.TemporaryDecision {
 	s.prune()
 	items := make([]ui.TemporaryDecision, 0, len(s.items))
 	for key, item := range s.items {
-		items = append(items, ui.TemporaryDecision{
+		row := ui.TemporaryDecision{
 			ID: item.id, KeyFingerprint: key.key, HostFingerprint: key.server,
 			Host: item.host, User: key.user, Allowed: item.allowed,
 			ExpiresAt: item.expires.UTC().Format(time.RFC3339),
-		})
+		}
+		if name := item.anchorName(); name != "" {
+			row.Process, row.ProcessPID = name, item.anchor.PID
+			row.ProcessLive = proc.Alive(item.anchor)
+		}
+		items = append(items, row)
 	}
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].ExpiresAt == items[j].ExpiresAt {
@@ -106,24 +130,26 @@ func (a *Authorizer) ChangeTemporaryDecision(change ui.DecisionChange) error {
 	if change.ID == "" || len(change.ID) > 128 {
 		return errors.New("select an active temporary decision")
 	}
-	if change.Action != "revoke" && change.Action != "update" {
+	if change.Action != "revoke" && change.Action != "revoke-process" && change.Action != "update" {
 		return errors.New("unknown temporary decision action")
 	}
-	if change.Action == "revoke" && (change.Minutes != 0 || change.EndOfDay) {
+	if change.Action != "update" && (change.Minutes != 0 || change.EndOfDay) {
 		return errors.New("revoking a decision cannot specify a duration")
 	}
 	if change.Action == "update" && ((change.EndOfDay && change.Minutes != 0) ||
 		(!change.EndOfDay && (change.Minutes < 1 || change.Minutes > 1440))) {
 		return errors.New("choose an interval from 1 to 1440 minutes")
 	}
-	decision, err := a.changeTemporary(change)
+	decisions, err := a.changeTemporary(change)
 	if err == nil && a.observe != nil {
-		a.observe(decision)
+		for _, decision := range decisions {
+			a.observe(decision)
+		}
 	}
 	return err
 }
 
-func (a *Authorizer) changeTemporary(change ui.DecisionChange) (Decision, error) {
+func (a *Authorizer) changeTemporary(change ui.DecisionChange) ([]Decision, error) {
 	s := a.decisions
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -133,10 +159,22 @@ func (a *Authorizer) changeTemporary(change ui.DecisionChange) (Decision, error)
 			continue
 		}
 		record := Decision{KeyFingerprint: key.key, HostFingerprint: key.server, User: key.user, Source: "management"}
-		if change.Action == "revoke" {
+		record.Process, record.ProcessPID, record.ProcessVersion = item.anchorName(), item.anchor.PID, item.anchor.Version
+		switch change.Action {
+		case "revoke":
 			delete(s.items, key)
 			record.Outcome = "revoked"
-			return record, nil
+			return []Decision{record}, nil
+		case "revoke-process":
+			// The window names one row; the agent works out which other rows
+			// were granted to the same running program. A row with no anchor
+			// has no siblings, so this falls back to revoking just that row.
+			if item.anchor.PID == 0 {
+				delete(s.items, key)
+				record.Outcome = "revoked"
+				return []Decision{record}, nil
+			}
+			return s.revokeProcess(item.anchor), nil
 		}
 		scope := ui.GrantCustom
 		if change.EndOfDay {
@@ -150,14 +188,38 @@ func (a *Authorizer) changeTemporary(change ui.DecisionChange) (Decision, error)
 		}
 		until, err := decisionExpiry(s.now(), ui.Confirmation{Allowed: item.allowed, Scope: scope, DurationMinutes: change.Minutes})
 		if err != nil {
-			return Decision{}, err
+			return nil, err
 		}
 		item.expires = until
 		s.items[key] = item
 		record.Outcome = "updated"
 		record.Scope = string(scope)
 		record.ExpiresAt = &until
-		return record, nil
+		return []Decision{record}, nil
 	}
-	return Decision{}, errors.New("this decision has expired or was already revoked")
+	return nil, errors.New("this decision has expired or was already revoked")
+}
+
+// revokeProcess drops every decision held by one process, identified by PID and
+// PID version together so that a reused number cannot take a decision with it.
+func (s *decisionStore) revokeProcess(anchor proc.Link) []Decision {
+	var records []Decision
+	for key, item := range s.items {
+		if item.anchor.PID == 0 || !item.anchor.Same(anchor) {
+			continue
+		}
+		delete(s.items, key)
+		records = append(records, Decision{
+			KeyFingerprint: key.key, HostFingerprint: key.server, User: key.user,
+			Source: "management", Outcome: "revoked",
+			Process: item.anchorName(), ProcessPID: item.anchor.PID, ProcessVersion: item.anchor.Version,
+		})
+	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].KeyFingerprint == records[j].KeyFingerprint {
+			return records[i].HostFingerprint < records[j].HostFingerprint
+		}
+		return records[i].KeyFingerprint < records[j].KeyFingerprint
+	})
+	return records
 }

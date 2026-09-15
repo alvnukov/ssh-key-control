@@ -32,6 +32,11 @@ func (c Confirmation) Lifetime() (duration time.Duration, endOfDay bool, err err
 		return 15 * time.Minute, false, nil
 	case GrantDay, DenyDay:
 		return 0, true, nil
+	case GrantProcess, DenyProcess:
+		// The anchor dying ends this decision on its own; the day is the
+		// outer bound, so that an application left open for a fortnight
+		// does not hold a signing decision for a fortnight.
+		return MaxCustomDurationMinutes * time.Minute, false, nil
 	case Deny1Hour:
 		return time.Hour, false, nil
 	default:

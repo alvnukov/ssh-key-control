@@ -9,6 +9,9 @@ public final class MenuBarApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var setup: AgentSetupWindowController?
     private let historyModel = SecurityHistoryModel()
     private let lifecycle = LifecycleModel()
+    private let keyring = KeyringModel()
+    private var keys: KeysWindowController?
+    private var keysItem: NSMenuItem?
     private let managed: Bool
 
     public init(managed: Bool = false) {
@@ -37,6 +40,14 @@ public final class MenuBarApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         titleItem.view = titleView
         menu.addItem(titleItem)
         menu.addItem(.separator())
+        // The agent holds keys in memory and nowhere else, so what it holds and
+        // how to change it belong at the top of the menu rather than in a
+        // terminal command nobody has been told about. The count is in the
+        // item itself: the usual question is answered without opening anything.
+        let keysItem = actionItem(keyring.menuTitle, #selector(openKeys), key: "k")
+        menu.addItem(keysItem)
+        self.keysItem = keysItem
+        menu.addItem(.separator())
         menu.addItem(actionItem(L10n.string("Temporary Decisions…"), #selector(openTemporaryDecisions)))
         menu.addItem(actionItem(L10n.string("Security History…"), #selector(openHistory), key: "y"))
         menu.addItem(actionItem(L10n.string("Settings…"), #selector(openSettings), key: ","))
@@ -58,7 +69,12 @@ public final class MenuBarApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             openSetup()
         }
         if !needsInitialSetup {
-            Task { await checkLifecycle() }
+            // Keys marked "load at login" go in once the agent is known to be
+            // running, and only into an agent that is holding nothing.
+            Task {
+                await checkLifecycle()
+                await keyring.loadAtLogin()
+            }
         }
     }
 
@@ -71,7 +87,20 @@ public final class MenuBarApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard setup?.isRunning != true else { setup?.open(); return .terminateCancel }
         return .terminateNow
     }
-    public func menuWillOpen(_ menu: NSMenu) { historyModel.refresh() }
+    public func menuWillOpen(_ menu: NSMenu) {
+        historyModel.refresh()
+        showKeyState()
+        Task {
+            await keyring.refresh()
+            showKeyState()
+        }
+    }
+
+    /// The count is read while the menu is open, so the item follows the agent
+    /// rather than showing what was true the last time anyone looked.
+    private func showKeyState() {
+        keysItem?.title = keyring.menuTitle
+    }
 
     private func actionItem(_ title: String, _ action: Selector, key: String = "") -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
@@ -106,6 +135,7 @@ public final class MenuBarApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let editItem = NSMenuItem(title: L10n.string("Edit"), action: nil, keyEquivalent: ""); editItem.submenu = edit; main.addItem(editItem)
         let window = NSMenu(title: L10n.string("Window"))
+        window.addItem(actionItem(L10n.string("SSH Keys"), #selector(openKeys), key: "k"))
         window.addItem(actionItem(L10n.string("Security History"), #selector(openHistory), key: "y"))
         window.addItem(withTitle: L10n.string("Close"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         let windowItem = NSMenuItem(title: L10n.string("Window"), action: nil, keyEquivalent: ""); windowItem.submenu = window; main.addItem(windowItem)
@@ -120,6 +150,15 @@ public final class MenuBarApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if settings == nil { settings = SettingsWindowController(lifecycle: lifecycle) }
         settings?.open()
     }
+    @objc private func openKeys() {
+        if keys == nil { keys = KeysWindowController(model: keyring) }
+        keys?.open()
+        Task {
+            await keyring.refresh()
+            showKeyState()
+        }
+    }
+
     @objc private func openTemporaryDecisions() {
         Task {
             let result = await AgentSetupCommand.run(.permissions, bundle: Bundle.main.bundleURL)

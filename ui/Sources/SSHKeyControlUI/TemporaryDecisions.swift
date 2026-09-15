@@ -9,9 +9,24 @@ public struct TemporaryDecision: Codable, Equatable, Sendable {
     public let user: String
     public let allowed: Bool
     public let expiresAt: String
+    /// The program this decision is kept for, and whether that program is
+    /// still running. An empty name means every program on this Mac, which is
+    /// where refusals live and where an approval goes when nobody could be named.
+    public var process: String? = nil
+    public var processPid: Int32? = nil
+    public var processLive: Bool? = nil
 
     var expiry: Date? { ISO8601DateFormatter().date(from: expiresAt) }
     var isActive: Bool { expiry.map { $0 > Date() } ?? false }
+    var isAnchored: Bool { !(process ?? "").isEmpty }
+
+    /// What the program column reads. A decision whose program has ended is
+    /// still shown: it stops matching, and saying so is clearer than hiding it.
+    var programLabel: String {
+        guard let name = process, !name.isEmpty else { return L10n.string("Every program") }
+        let label = processPid.map { "\(name) [\($0)]" } ?? name
+        return processLive == true ? label : label + " " + L10n.string("(ended)")
+    }
 }
 
 public struct DecisionChange: Codable, Equatable, Sendable {
@@ -39,6 +54,7 @@ final class TemporaryDecisionsPanel: NSObject, NSTableViewDataSource, NSTableVie
     private let status = NSTextField(wrappingLabelWithString: "")
     private let edit = NSButton(title: L10n.string("Change Duration…"), target: nil, action: nil)
     private let revoke = NSButton(title: L10n.string("Revoke Decision"), target: nil, action: nil)
+    private let revokeProgram = NSButton(title: L10n.string("Revoke All for Program"), target: nil, action: nil)
     private var items: [TemporaryDecision] = []
     private var response = DecisionChange(action: "close")
     private var inModal = false
@@ -54,7 +70,8 @@ final class TemporaryDecisionsPanel: NSObject, NSTableViewDataSource, NSTableVie
         table.allowsMultipleSelection = false
         table.style = .inset
         table.rowHeight = 28
-        for (id, title, width) in [("decision", "Decision", 110.0), ("destination", "Server / SSH user", 400.0), ("expiry", "Expires", 190.0)] {
+        for (id, title, width) in [("decision", "Decision", 100.0), ("program", "Program", 170.0),
+                                   ("destination", "Server / SSH user", 280.0), ("expiry", "Expires", 150.0)] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
             column.title = L10n.string(title)
             column.width = width
@@ -72,17 +89,18 @@ final class TemporaryDecisionsPanel: NSObject, NSTableViewDataSource, NSTableVie
         detail.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         detail.isSelectable = true
         detail.setContentCompressionResistancePriority(.required, for: .vertical)
-        detail.heightAnchor.constraint(greaterThanOrEqualToConstant: 62).isActive = true
+        detail.heightAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
         status.textColor = .secondaryLabelColor
         edit.target = self; edit.action = #selector(editDuration)
         revoke.target = self; revoke.action = #selector(revokeSelected)
+        revokeProgram.target = self; revokeProgram.action = #selector(revokeProgramOfSelected)
         let refresh = NSButton(title: L10n.string("Refresh"), target: self, action: #selector(refreshList))
         let close = NSButton(title: L10n.string("Done"), target: self, action: #selector(closePanel))
         close.keyEquivalent = "\r"
-        for button in [edit, revoke, refresh, close] { button.bezelStyle = .rounded }
+        for button in [edit, revoke, revokeProgram, refresh, close] { button.bezelStyle = .rounded }
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let buttons = NSStackView(views: [edit, revoke, spacer, refresh, close])
+        let buttons = NSStackView(views: [edit, revoke, revokeProgram, spacer, refresh, close])
         buttons.orientation = .horizontal
         buttons.spacing = 8
         let column = NSStackView(views: [explanation, scroll, detail, status, buttons])
@@ -145,14 +163,18 @@ final class TemporaryDecisionsPanel: NSObject, NSTableViewDataSource, NSTableVie
     private func updateSelection() {
         guard let item = selected else {
             detail.stringValue = L10n.string("Select a decision to view its exact key and server fingerprints.")
-            edit.isEnabled = false; revoke.isEnabled = false
+            edit.isEnabled = false; revoke.isEnabled = false; revokeProgram.isEnabled = false
             return
         }
         detail.stringValue = L10n.string("Key fingerprint") + ": " + item.keyFingerprint + "\n"
             + L10n.string("Server fingerprint") + ": " + item.hostFingerprint + "\n"
-            + L10n.string("SSH user") + ": " + item.user
+            + L10n.string("SSH user") + ": " + item.user + "\n"
+            + L10n.string("Program") + ": " + item.programLabel
         edit.isEnabled = item.isActive
         revoke.isEnabled = item.isActive
+        // There is nothing to gather up for a decision that was never kept for
+        // one program: revoking it is what the plain button already does.
+        revokeProgram.isEnabled = item.isActive && item.isAnchored
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { items.count }
@@ -163,6 +185,7 @@ final class TemporaryDecisionsPanel: NSObject, NSTableViewDataSource, NSTableVie
         let text: String
         switch tableColumn?.identifier.rawValue {
         case "decision": text = L10n.string(item.allowed ? "Allowed" : "Denied")
+        case "program": text = item.programLabel
         case "destination":
             text = item.user + " @ " + (item.host.isEmpty ? L10n.string("server name unavailable") : item.host)
         default:
@@ -191,6 +214,13 @@ final class TemporaryDecisionsPanel: NSObject, NSTableViewDataSource, NSTableVie
     @objc private func revokeSelected() {
         guard let item = selected, item.isActive else { return }
         finish(DecisionChange(action: "revoke", id: item.id))
+    }
+
+    /// Names one row and asks the agent for the rest. Which decisions belong
+    /// to the same program is the agent's answer, from the anchor it stored.
+    @objc private func revokeProgramOfSelected() {
+        guard let item = selected, item.isActive, item.isAnchored else { return }
+        finish(DecisionChange(action: "revoke-process", id: item.id))
     }
 
     @objc private func editDuration() {

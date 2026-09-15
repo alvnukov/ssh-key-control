@@ -37,12 +37,12 @@ func TestQueuedApprovalCanBeCancelled(t *testing.T) {
 	d := &blockingDialogs{entered: make(chan struct{}), release: make(chan struct{})}
 	a := confirmation.New(d, nil)
 	first := make(chan struct{})
-	go func() { defer close(first); a.Authorize(context.Background(), "key", "", nil) }()
+	go func() { defer close(first); a.Authorize(context.Background(), "key", "", nil, nil) }()
 	<-d.entered
 	defer func() { close(d.release); <-first }()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { _, err := a.Authorize(ctx, "other", "", nil); done <- err }()
+	go func() { _, err := a.Authorize(ctx, "other", "", nil, nil); done <- err }()
 	cancel()
 	select {
 	case err := <-done:
@@ -63,12 +63,12 @@ func TestCancelledAnswerCannotCreateGrant(t *testing.T) {
 		if scoped {
 			dest = &confirmation.Destination{User: "alice", HostKey: "SHA256:server"}
 		}
-		allowed, err := a.Authorize(ctx, "key", "", dest)
+		allowed, err := a.Authorize(ctx, "key", "", dest, nil)
 		if allowed || !errors.Is(err, context.Canceled) {
 			t.Fatalf("cancelled answer: %t %v", allowed, err)
 		}
 		d.cancel = nil
-		if ok, err := a.Authorize(context.Background(), "key", "", dest); !ok || err != nil {
+		if ok, err := a.Authorize(context.Background(), "key", "", dest, nil); !ok || err != nil {
 			t.Fatalf("next answer: %t %v", ok, err)
 		}
 		if d.calls != 2 {

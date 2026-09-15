@@ -25,7 +25,7 @@ func TestGenericApprovalPromptsEveryTime(t *testing.T) {
 	d := &dialogs{allowed: true}
 	a := confirmation.New(d, func() time.Time { return time.Unix(0, 0) })
 	for range 2 {
-		allowed, err := a.Authorize(context.Background(), "SHA256:key", "work", nil)
+		allowed, err := a.Authorize(context.Background(), "SHA256:key", "work", nil, nil)
 		if err != nil || !allowed {
 			t.Fatalf("Authorize = %v, %v", allowed, err)
 		}

@@ -23,7 +23,10 @@ final class FakeDialogs: Dialogs {
         return textAnswer
     }
 
-    func confirm(title: String, message: String, allow: String, deny: String) throws -> Bool {
+    var chain: [ProcessLink] = []
+
+    func confirm(title: String, message: String, allow: String, deny: String, chain: [ProcessLink]) throws -> Bool {
+        self.chain = chain
         calls.append("confirm(\(title)|\(message)|\(allow)|\(deny))")
         if let error { throw error }
         return confirmAnswer

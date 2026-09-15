@@ -22,7 +22,17 @@ struct SecurityEvent: Decodable, Identifiable, Sendable {
     let user: String?
     let scope: String?
     let expiresAt: Date?
+    /// The program a timed decision was kept for, as it was at the time. The
+    /// journal records what happened; it never brings a program back to life.
+    let process: String?
+    let processPid: Int32?
 
+    /// What the detail pane reads for the program. A decision kept for nobody
+    /// in particular says so, rather than leaving the field blank.
+    var programLabel: String {
+        guard let name = process, !name.isEmpty else { return L10n.string("Every program") }
+        return processPid.map { "\(name) [\($0)]" } ?? name
+    }
     var isVerified: Bool { !(hostFingerprint ?? "").isEmpty && !(user ?? "").isEmpty }
     var title: String {
         switch outcome {

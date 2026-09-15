@@ -8,6 +8,10 @@ public final class AppKitDialogs: Dialogs {
     public static let defaultsSuite = "io.github.alvnukov.ssh-key-control"
     public static let rememberKey = "rememberInKeychain"
     public static let enterActionKey = "confirmationEnterAction"
+    /// Whether a request whose calling program could not be named may still be
+    /// granted for a while. This lives here and is never told to the agent: a
+    /// setting the agent cannot hear is a setting no program can weaken.
+    public static let unanchoredDurationsKey = "timedDecisionsWithoutProgram"
 
     private let defaults: UserDefaults
     private var panels: [NSPanel] = []
@@ -77,21 +81,25 @@ public final class AppKitDialogs: Dialogs {
         return field.stringValue
     }
 
-    public func confirm(title: String, message: String, allow: String, deny: String) throws -> Bool {
-        try confirmScoped(title: title, message: message, allow: allow, deny: deny, destination: "").allowed
+    public func confirm(title: String, message: String, allow: String, deny: String, chain: [ProcessLink]) throws -> Bool {
+        try confirmScoped(title: title, message: message, allow: allow, deny: deny, destination: "",
+                          chain: chain, boundary: 0).allowed
     }
 
-    public func confirmScoped(title: String, message: String, allow: String, deny: String, destination: String) throws -> Confirmation {
+    public func confirmScoped(title: String, message: String, allow: String, deny: String, destination: String,
+                              chain: [ProcessLink], boundary: Int) throws -> Confirmation {
         // A fresh panel for every request: grants are never remembered by the UI.
         let enterAction = ConfirmationEnterAction(rawValue: defaults.string(forKey: Self.enterActionKey) ?? "") ?? .deny
         let panel = ConfirmationPanel(title: title, message: message, allow: allow, deny: deny,
-                                      destination: destination, enterAction: enterAction)
+                                      destination: destination, chain: chain, boundary: boundary,
+                                      unanchoredDurations: unanchoredDurations, enterAction: enterAction)
         panel.center()
         SSHKeyControlActivateApp()
         panel.makeKeyAndOrderFront(nil)
         let result = NSApp.runModal(for: panel)
         panel.orderOut(nil)
-        return Confirmation(allowed: result == .OK, scope: panel.scope, durationMinutes: panel.durationMinutes)
+        return Confirmation(allowed: result == .OK, scope: panel.scope,
+                            durationMinutes: panel.durationMinutes, boundary: panel.boundary)
     }
 
     public func notify(title: String, message: String) throws {
@@ -124,6 +132,10 @@ public final class AppKitDialogs: Dialogs {
     private var rememberDefault: Bool {
         get { defaults.object(forKey: Self.rememberKey) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Self.rememberKey) }
+    }
+
+    private var unanchoredDurations: Bool {
+        defaults.object(forKey: Self.unanchoredDurationsKey) as? Bool ?? true
     }
 
     private func makeAlert(title: String, message: String, accessory: NSView?) -> NSAlert {
@@ -179,21 +191,33 @@ enum ConfirmationEnterAction: String {
 final class ConfirmationPanel: NSPanel {
     private(set) var scope: GrantScope = .once
     private(set) var durationMinutes: Int?
+    /// Where the granted decision attaches, as an index into the chain shown.
+    /// Nil whenever nothing was granted, or no chain was on offer.
+    private(set) var boundary: Int?
     let allowButton = NSButton()
     let denyButton = NSButton()
     let durationPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     let customValue = NSTextField(string: "15")
     let customUnit = NSPopUpButton(frame: .zero, pullsDown: false)
     let enterAction: ConfirmationEnterAction
+    let chainView: ProcessChainView?
     private let timedChoicesAllowed: Bool
     private let customControls = NSStackView()
     private let validationMessage = NSTextField(wrappingLabelWithString: "")
     private var column: NSStackView!
+    private var chainScroll: NSScrollView?
+    private var chainHeight: NSLayoutConstraint?
 
     init(title: String, message: String, allow: String, deny: String, destination: String,
+         chain: [ProcessLink] = [], boundary: Int = 0, unanchoredDurations: Bool = true,
          enterAction: ConfirmationEnterAction = .deny) {
         self.enterAction = enterAction
-        timedChoicesAllowed = !destination.isEmpty
+        let chainView = chain.isEmpty ? nil : ProcessChainView(links: chain, boundary: boundary)
+        self.chainView = chainView
+        let anchored = (chainView?.proposed ?? 0) > 0
+        // A request whose program could not be named can still be granted for
+        // a while, unless this Mac has been told to require one.
+        timedChoicesAllowed = !destination.isEmpty && (anchored || unanchoredDurations)
         super.init(contentRect: NSRect(x: 0, y: 0, width: 560, height: 180),
                    styleMask: [.titled], backing: .buffered, defer: false)
         self.title = "SSH Key Control"
@@ -231,6 +255,18 @@ final class ConfirmationPanel: NSPanel {
         } else if !message.isEmpty {
             views.append(Self.label(L10n.message(message)))
         }
+        if let chainView {
+            let caption = Self.label(L10n.string("Requested by"))
+            caption.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            caption.textColor = .secondaryLabelColor
+            views.append(caption)
+            views.append(chainContainer(chainView))
+        }
+        if !destination.isEmpty && !anchored {
+            views.append(Self.label(L10n.string(timedChoicesAllowed
+                ? "The program that asked could not be identified, so a timed approval would apply to every program, and a refusal applies to this request only."
+                : "The program that asked could not be identified, and this Mac only grants timed decisions to a named program.")))
+        }
 
         for (button, label, selector) in [
             (denyButton, deny, #selector(denyRequest)),
@@ -241,6 +277,9 @@ final class ConfirmationPanel: NSPanel {
             button.target = self
             button.action = selector
             button.setContentHuggingPriority(.required, for: .horizontal)
+            // A decision button that names a program is read before it is
+            // pressed. It widens the panel rather than losing the name.
+            button.setContentCompressionResistancePriority(.required, for: .horizontal)
         }
         let selected = enterAction == .allow ? allowButton : denyButton
         selected.keyEquivalent = "\r"
@@ -252,10 +291,14 @@ final class ConfirmationPanel: NSPanel {
 
         if isSSH || timedChoicesAllowed {
             durationPicker.menu?.autoenablesItems = false
-            let choices: [(String, GrantScope)] = [
+            var choices: [(String, GrantScope)] = [
                 ("Once", .once), ("5 minutes", .fiveMinutes), ("15 minutes", .fifteenMinutes),
-                ("Until end of local day", .day), ("Custom interval…", .custom)
+                ("Until end of local day", .day)
             ]
+            // A lifetime measured against a program is only offered when there
+            // is a program to measure it against.
+            if anchored { choices.append(("While this program runs", .process)) }
+            choices.append(("Custom interval…", .custom))
             for (label, scope) in choices where timedChoicesAllowed || scope == .once {
                 durationPicker.addItem(withTitle: L10n.string(label))
                 durationPicker.lastItem?.representedObject = scope.rawValue
@@ -290,18 +333,26 @@ final class ConfirmationPanel: NSPanel {
         column.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
         column.translatesAutoresizingMaskIntoConstraints = false
         contentView = column
-        column.widthAnchor.constraint(equalToConstant: 560).isActive = true
+        // Decision buttons that name a program can want more than the usual
+        // 560 points. The panel is sized once for the widest pair it could
+        // ever show, so naming a program never clips it and choosing another
+        // duration or another link never makes the panel jump.
+        let wanted = Self.decisionWidth(chain: chain, proposed: chainView?.proposed ?? 0,
+                                        timed: timedChoicesAllowed) + 8 + 48
+        column.widthAnchor.constraint(equalToConstant: max(560, wanted.rounded(.up))).isActive = true
         controls.trailingAnchor.constraint(equalTo: column.trailingAnchor, constant: -24).isActive = true
-        for view in views where view !== controls {
+        for view in views where view !== controls && view !== chainScroll {
             view.widthAnchor.constraint(lessThanOrEqualTo: column.widthAnchor, constant: -48).isActive = true
         }
+        // The chain reads as a column of its own, the full width of the panel.
+        chainScroll?.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -48).isActive = true
+        updateDecisionButtons()
+        fitChain()
         setContentSize(column.fittingSize)
         initialFirstResponder = selected
         denyButton.nextKeyView = allowButton
-        allowButton.nextKeyView = timedChoicesAllowed ? durationPicker : denyButton
-        durationPicker.nextKeyView = denyButton
-        customValue.nextKeyView = customUnit
-        customUnit.nextKeyView = denyButton
+        relinkKeyLoop()
+        chainView?.onChange = { [weak self] in self?.chainDidChange() }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -329,10 +380,138 @@ final class ConfirmationPanel: NSPanel {
         return stack
     }
 
+    /// The chain sizes itself until it would take over the screen; past that
+    /// it scrolls, so the decision buttons are never pushed out of reach.
+    private func chainContainer(_ view: ProcessChainView) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.documentView = view
+        view.translatesAutoresizingMaskIntoConstraints = false
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            view.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            view.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)
+        ])
+        chainScroll = scroll
+        let height = scroll.heightAnchor.constraint(equalToConstant: 40)
+        height.isActive = true
+        chainHeight = height
+        return scroll
+    }
+
+    private func fitChain() {
+        guard let chainView, let chainHeight else { return }
+        chainView.layoutSubtreeIfNeeded()
+        chainHeight.constant = min(max(chainView.fittingSize.height, 22), 300)
+    }
+
+    private func chainDidChange() {
+        updateDecisionButtons()
+        relinkKeyLoop()
+        fitChain()
+        if column != nil { setContentSize(column.fittingSize) }
+    }
+
+    var selectedScope: GrantScope {
+        (durationPicker.selectedItem?.representedObject as? String).flatMap(GrantScope.init(rawValue:)) ?? .once
+    }
+
+    /// The decision buttons say what pressing them does. Both name the program
+    /// the decision is kept for, because a refusal is drawn at the same line an
+    /// approval is: it stops what the user just turned away, not their own next
+    /// connection.
+    private func updateDecisionButtons() {
+        guard timedChoicesAllowed else { return }
+        let program = chainView?.anchor?.label
+        allowButton.title = Self.allowTitle(selectedScope, program: program)
+        denyButton.title = Self.denyTitle(selectedScope, program: program)
+    }
+
+    private static func allowTitle(_ scope: GrantScope, program: String?) -> String {
+        guard let program = program.map(Self.short) else {
+            switch scope {
+            case .fiveMinutes: return L10n.string("Allow for 5 minutes")
+            case .fifteenMinutes: return L10n.string("Allow for 15 minutes")
+            case .day: return L10n.string("Allow until end of local day")
+            case .custom: return L10n.string("Allow for the chosen interval")
+            default: return L10n.string("Allow once")
+            }
+        }
+        switch scope {
+        case .fiveMinutes: return L10n.format("Allow %@ for 5 minutes", program)
+        case .fifteenMinutes: return L10n.format("Allow %@ for 15 minutes", program)
+        case .day: return L10n.format("Allow %@ until end of local day", program)
+        case .process: return L10n.format("Allow %@ while it runs", program)
+        case .custom: return L10n.format("Allow %@ for the chosen interval", program)
+        default: return L10n.string("Allow once")
+        }
+    }
+
+    /// How much room the two decision buttons need in the worst case: every
+    /// duration, against every program the user is allowed to move the line to.
+    private static func decisionWidth(chain: [ProcessLink], proposed: Int, timed: Bool) -> CGFloat {
+        guard timed else { return 0 }
+        let probe = NSButton(title: "", target: nil, action: nil)
+        probe.bezelStyle = .rounded
+        func width(_ title: String) -> CGFloat {
+            probe.title = title
+            return probe.fittingSize.width
+        }
+        let scopes: [GrantScope] = [.once, .fiveMinutes, .fifteenMinutes, .day, .process, .custom]
+        let programs: [String?] = proposed > 0 ? chain[proposed...].map(\.label) : [nil]
+        let titles = programs.flatMap { program in
+            scopes.map { (width(allowTitle($0, program: program)), width(denyTitle($0, program: program))) }
+        }
+        return (titles.map(\.0).max() ?? 0) + (titles.map(\.1).max() ?? 0)
+    }
+
+    private static func denyTitle(_ scope: GrantScope, program: String?) -> String {
+        // A refusal nobody can attach to a program is not kept at all: it would
+        // otherwise silence the user's own work afterwards without ever showing
+        // a window to say why. The button promises only what it will do.
+        guard let program = program.map(Self.short) else { return L10n.string("Deny once") }
+        switch scope {
+        case .fiveMinutes: return L10n.format("Deny %@ for 5 minutes", program)
+        case .fifteenMinutes: return L10n.format("Deny %@ for 15 minutes", program)
+        case .day: return L10n.format("Deny %@ until end of local day", program)
+        case .process: return L10n.format("Deny %@ while it runs", program)
+        case .custom: return L10n.format("Deny %@ for the chosen interval", program)
+        default: return L10n.string("Deny once")
+        }
+    }
+
+    /// A button title stays on one line whatever a program calls itself.
+    private static func short(_ label: String) -> String {
+        label.count <= 28 ? label : String(label.prefix(27)) + "…"
+    }
+
+    /// Tab reaches the links that can be chosen, between the duration menu and
+    /// the decision buttons. The chain is rebuilt on every click, so the loop
+    /// is laid again each time.
+    private func relinkKeyLoop() {
+        var entry = denyButton
+        if timedChoicesAllowed, let chainView {
+            let ordered = chainView.linkButtons.filter { $0.value.action != nil }
+                .sorted { $0.key > $1.key }.map(\.value)
+            for (current, next) in zip(ordered, ordered.dropFirst()) { current.nextKeyView = next }
+            ordered.last?.nextKeyView = denyButton
+            entry = ordered.first ?? denyButton
+        }
+        allowButton.nextKeyView = timedChoicesAllowed ? durationPicker : entry
+        durationPicker.nextKeyView = selectedScope == .custom ? customValue : entry
+        customValue.nextKeyView = customUnit
+        customUnit.nextKeyView = entry
+    }
+
     @objc private func durationChanged() {
-        let custom = durationPicker.selectedItem?.representedObject as? String == GrantScope.custom.rawValue
+        let custom = selectedScope == .custom
         customControls.isHidden = !custom
-        durationPicker.nextKeyView = custom ? customValue : denyButton
+        updateDecisionButtons()
+        relinkKeyLoop()
         validationMessage.isHidden = true
         customValue.toolTip = L10n.string("Choose 1–1440 minutes or 1–24 hours.")
         setContentSize(column.fittingSize)
@@ -353,9 +532,7 @@ final class ConfirmationPanel: NSPanel {
     @objc private func allowRequest() { finish(allowed: true) }
 
     private func finish(allowed: Bool, once: Bool = false) {
-        let selected = timedChoicesAllowed && !once
-            ? (durationPicker.selectedItem?.representedObject as? String).flatMap(GrantScope.init(rawValue:)) ?? .once
-            : .once
+        let selected = timedChoicesAllowed && !once ? selectedScope : .once
         var minutes: Int?
         if selected == .custom {
             let value = customValue.stringValue
@@ -370,9 +547,18 @@ final class ConfirmationPanel: NSPanel {
             }
             minutes = amount * (customUnit.indexOfSelectedItem == 1 ? 60 : 1)
         }
-        guard let decisionScope = selected.scope(forAllowed: allowed) else { return }
+        guard var decisionScope = selected.scope(forAllowed: allowed) else { return }
+        let anchor = chainView.flatMap { $0.proposed > 0 ? $0.boundary : nil }
+        // A refusal with no program to attach to is kept for nothing: it would
+        // otherwise silence the user's own work afterwards with no window to
+        // say why. It answers this request and is gone, which is what the deny
+        // button promises when it cannot name a program.
+        if !allowed && anchor == nil { decisionScope = .once }
         scope = decisionScope
         durationMinutes = minutes
+        // Both answers attach to the program they were drawn at, so both say
+        // where. An answer kept for nothing has nowhere to attach.
+        boundary = allowed || decisionScope.isDenyDuration ? anchor : nil
         NSApp.stopModal(withCode: allowed ? .OK : .cancel)
     }
 }

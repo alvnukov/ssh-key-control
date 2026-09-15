@@ -7,9 +7,11 @@ public protocol Dialogs {
     func secret(title: String, message: String, remember: String?) throws -> (secret: String, remember: Bool)
     /// Asks for visible text.
     func text(title: String, message: String, placeholder: String) throws -> String
-    /// Asks a yes/no question; true means allowed.
-    func confirm(title: String, message: String, allow: String, deny: String) throws -> Bool
-    func confirmScoped(title: String, message: String, allow: String, deny: String, destination: String) throws -> Confirmation
+    /// Asks a yes/no question; true means allowed. `chain` is who is asking,
+    /// which is worth showing even when nothing but this one answer is at stake.
+    func confirm(title: String, message: String, allow: String, deny: String, chain: [ProcessLink]) throws -> Bool
+    func confirmScoped(title: String, message: String, allow: String, deny: String, destination: String,
+                       chain: [ProcessLink], boundary: Int) throws -> Confirmation
     func manageDecisions(_ decisions: [TemporaryDecision], message: String, activate: Bool) throws -> DecisionChange
     /// Shows a panel and returns at once; the panel lives until the process ends.
     func notify(title: String, message: String) throws
@@ -20,8 +22,9 @@ public extension Dialogs {
         throw Failure.other("Temporary decision management is unavailable.")
     }
     /// Older implementations can only grant this request once.
-    func confirmScoped(title: String, message: String, allow: String, deny: String, destination: String) throws -> Confirmation {
-        Confirmation(allowed: try confirm(title: title, message: message, allow: allow, deny: deny))
+    func confirmScoped(title: String, message: String, allow: String, deny: String, destination: String,
+                       chain: [ProcessLink], boundary: Int) throws -> Confirmation {
+        Confirmation(allowed: try confirm(title: title, message: message, allow: allow, deny: deny, chain: chain))
     }
 }
 /// Where secrets are kept between runs. Keychain is the real one.
@@ -61,15 +64,17 @@ public struct Dispatcher {
                 title: req.title ?? "", message: req.message ?? "", placeholder: req.placeholder ?? "")
             return .success(answer: answer)
         case .confirm:
+            let chain = req.chain ?? []
             if let destination = req.destination, !destination.isEmpty {
                 let choice = try dialogs.confirmScoped(
                     title: req.title ?? "", message: req.message ?? "",
-                    allow: req.allow ?? "Allow", deny: req.deny ?? "Deny", destination: destination)
+                    allow: req.allow ?? "Allow", deny: req.deny ?? "Deny", destination: destination,
+                    chain: chain, boundary: boundary(req, chain: chain))
                 return .confirmation(choice)
             }
             let allowed = try dialogs.confirm(
                 title: req.title ?? "", message: req.message ?? "",
-                allow: req.allow ?? "Allow", deny: req.deny ?? "Deny")
+                allow: req.allow ?? "Allow", deny: req.deny ?? "Deny", chain: chain)
             return .success(answer: allowed ? "yes" : "no")
         case .manageDecisions:
             let change = try dialogs.manageDecisions(req.decisions ?? [], message: req.message ?? "", activate: req.activate ?? false)
@@ -89,6 +94,14 @@ public struct Dispatcher {
             try store.delete(account: try account(req))
             return .success()
         }
+    }
+
+    /// A boundary is only meaningful as an index into the chain that came with
+    /// it, and never names the caller itself: anything else is dropped rather
+    /// than shown, so a malformed request cannot draw a line in the wrong place.
+    private func boundary(_ req: Request, chain: [ProcessLink]) -> Int {
+        guard let boundary = req.boundary, boundary > 0, boundary < chain.count else { return 0 }
+        return boundary
     }
 
     private func account(_ req: Request) throws -> String {

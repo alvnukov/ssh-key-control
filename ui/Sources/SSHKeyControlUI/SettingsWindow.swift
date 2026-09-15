@@ -57,6 +57,8 @@ struct GeneralSettingsView: View {
     private var enterAction = "deny"
     @AppStorage(AppKitDialogs.rememberKey, store: UserDefaults(suiteName: AppKitDialogs.defaultsSuite))
     private var remember = true
+    @AppStorage(AppKitDialogs.unanchoredDurationsKey, store: UserDefaults(suiteName: AppKitDialogs.defaultsSuite))
+    private var unanchoredDurations = true
     @ObservedObject var login: LoginItemModel
     @ObservedObject var lifecycle: LifecycleModel
 
@@ -68,6 +70,9 @@ struct GeneralSettingsView: View {
                     Text(L10n.string("Allow")).tag("allow")
                 }
                 Text(L10n.string("The highlighted button uses the selected duration. Escape always denies once."))
+                    .font(.callout).foregroundStyle(.secondary)
+                Toggle(L10n.string("Offer a duration when the calling program cannot be identified"), isOn: $unanchoredDurations)
+                Text(L10n.string("Such an approval applies to every program until it expires. Turning this off leaves those requests answerable once only. The agent is never told either way: this dialog simply stops offering."))
                     .font(.callout).foregroundStyle(.secondary)
             } header: { Text(L10n.string("Confirmations")) }
             Section {
@@ -88,7 +93,7 @@ struct GeneralSettingsView: View {
             } header: { Text(L10n.string("Menu bar")) }
         }
         .formStyle(.grouped)
-        .frame(width: 520, height: 410)
+        .frame(width: 520, height: 500)
         .onAppear { login.refresh() }
     }
 
@@ -127,7 +132,7 @@ struct AdvancedSettingsView: View {
                 if let error = model.error { Text(error).foregroundStyle(.red).font(.callout) }
             } header: { Text(L10n.string("Security history")) }
             Section {
-                LabeledContent(L10n.string("Reusable approvals"), value: L10n.string("Exact key + server key + user"))
+                LabeledContent(L10n.string("Reusable approvals"), value: L10n.string("Exact key + server key + user + calling program"))
                 LabeledContent(L10n.string("Destination proof"), value: L10n.string("Verified session and SSH client"))
                 LabeledContent(L10n.string("Connections / packet size"), value: L10n.string("64 / 256 KiB"))
                 LabeledContent(L10n.string("Partial request timeout"), value: L10n.string("5 seconds"))

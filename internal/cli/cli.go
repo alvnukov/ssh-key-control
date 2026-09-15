@@ -57,6 +57,8 @@ type App struct {
 	StartHelper func(ctx context.Context, path string) (Helper, error)
 	// ActivateSocket acquires the listener owned by launchd, without binding a new socket.
 	ActivateSocket func(string) (net.Listener, error)
+	// SSHAdd loads private keys into the agent by running OpenSSH's own tool.
+	SSHAdd func(ctx context.Context, env, paths []string) (string, error)
 
 	Launchctl  launchd.Client
 	FS         install.FS
@@ -88,6 +90,7 @@ func Default(version string) *App {
 			return helper.Start(ctx, path)
 		},
 		ActivateSocket: agent.ActivateSocket,
+		SSHAdd:         execSSHAdd,
 		Launchctl:      launchd.Client{Runner: launchd.ExecRunner{}, Domain: launchd.UserDomain()},
 		FS:             install.OSFS{},
 		Sleep:          time.Sleep,
@@ -108,6 +111,9 @@ const usage = `usage: ssh-key-control <prompt>            answer an OpenSSH prom
        ssh-key-control install [--require force|prefer]
        ssh-key-control uninstall
        ssh-key-control status
+       ssh-key-control keys load [key-file...]
+       ssh-key-control keys unload [fingerprint...]
+       ssh-key-control keys list [--json] [key-file...]
        ssh-key-control system-agent status
        ssh-key-control permissions          open active temporary decisions
        ssh-key-control native-agent-monitor status|disable|enable
@@ -119,6 +125,8 @@ install    register a launch agent that runs ssh-agent with this program as
            its SSH_ASKPASS and exports it to the login session
 uninstall  remove the launch agent and return to the system ssh-agent
 status     show the agent and the login session's variables
+keys       load private keys into the protected agent, list the keys this Mac
+           has and which of them the agent holds, or take keys back out of it
 doctor     check the installation, this shell and ~/.ssh/config
 forget     delete a remembered passphrase (account is the key path or user@host)
 
@@ -140,6 +148,8 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		return a.exit(a.uninstall(ctx, rest))
 	case "status":
 		return a.exit(a.status(ctx, rest))
+	case "keys":
+		return a.exit(a.keys(ctx, rest))
 	case "lifecycle":
 		return a.exit(a.lifecycle(ctx, rest))
 	case "repair":
@@ -557,7 +567,8 @@ func (a *App) agent(ctx context.Context, args []string) error {
 	authorizer := confirmation.NewWithObserver(approvalDialogs{app: a}, time.Now, func(d confirmation.Decision) {
 		record(history.Event{Kind: "decision", Outcome: d.Outcome, Source: d.Source,
 			KeyFingerprint: d.KeyFingerprint, HostFingerprint: d.HostFingerprint, User: d.User,
-			Scope: d.Scope, ExpiresAt: d.ExpiresAt})
+			Scope: d.Scope, ExpiresAt: d.ExpiresAt,
+			Process: d.Process, ProcessPID: d.ProcessPID, ProcessVersion: d.ProcessVersion})
 	})
 	management := &temporaryDecisionManager{app: a, authorizer: authorizer, ctx: ctx}
 	protected := agent.NewProtectedWithManagement(func(ctx context.Context, req agent.SigningRequest) (bool, error) {
@@ -568,7 +579,7 @@ func (a *App) agent(ctx context.Context, args []string) error {
 				User: req.User, HostKey: req.HostKey,
 			}
 		}
-		return authorizer.Authorize(ctx, req.Fingerprint, req.Comment, destination)
+		return authorizer.Authorize(ctx, req.Fingerprint, req.Comment, destination, req.Caller)
 	}, management.open)
 	return agent.Run(ctx, agent.Runtime{
 		SocketLink: (sshconfig.ManagedConfig{Path: a.SSHConfig}).SocketPath(),

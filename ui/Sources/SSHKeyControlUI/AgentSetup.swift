@@ -4,6 +4,12 @@ import SwiftUI
 
 enum AgentSetupOperation: Sendable, Equatable {
     case enable, remove, lifecycle, repair, stopMenu, configMigration, migrateConfig, permissions
+    /// The key files to put into the agent; none means every key this Mac has.
+    case loadKeys([String])
+    /// The keys to take back out, by fingerprint; none means all of them.
+    case unloadKeys([String])
+    /// Key files to list beside the ones found in ~/.ssh and the SSH config.
+    case listKeys([String])
     var arguments: [String] {
         switch self {
         case .enable: ["install"]
@@ -14,6 +20,20 @@ enum AgentSetupOperation: Sendable, Equatable {
         case .configMigration: ["config-migration", "--json"]
         case .migrateConfig: ["migrate-config"]
         case .permissions: ["permissions"]
+        case .loadKeys(let paths): ["keys", "load"] + paths
+        case .unloadKeys(let fingerprints): ["keys", "unload"] + fingerprints
+        case .listKeys(let paths): ["keys", "list", "--json"] + paths
+        }
+    }
+
+    /// How long the command may take before it is stopped. Everything here is
+    /// a launchd or filesystem operation that either finishes in a moment or
+    /// is stuck — except loading a key, which waits for a passphrase to be
+    /// typed into a dialog, and a person is allowed to take their time.
+    var timeout: TimeInterval {
+        switch self {
+        case .loadKeys: 600
+        default: 30
         }
     }
 }
@@ -100,7 +120,7 @@ enum AgentSetupCommand {
                 try output.fileHandleForWriting.close()
                 defer { try? output.fileHandleForReading.close() }
                 let timer = DispatchSource.makeTimerSource()
-                timer.schedule(deadline: .now() + 30)
+                timer.schedule(deadline: .now() + operation.timeout)
                 timer.setEventHandler { if process.isRunning { process.terminate() } }
                 timer.resume()
                 defer { timer.cancel() }

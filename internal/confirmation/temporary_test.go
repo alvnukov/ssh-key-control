@@ -21,9 +21,10 @@ func TestTemporaryDecisionManagement(t *testing.T) {
 			var events []confirmation.Decision
 			a := confirmation.NewWithObserver(d, func() time.Time { return now }, func(e confirmation.Decision) { events = append(events, e) })
 			target := &confirmation.Destination{Host: "router", HostKey: "SHA256:server", User: "alice"}
+			who := caller(session(firstTestPID, firstTestPID+1))
 			authorize := func(key string) {
 				t.Helper()
-				got, err := a.Authorize(context.Background(), key, "", target)
+				got, err := a.Authorize(context.Background(), key, "", target, who)
 				if err != nil || got != allowed {
 					t.Fatalf("authorize=%v,%v", got, err)
 				}
@@ -99,7 +100,7 @@ func TestTemporaryDecisionExpiryAndInvalidEdits(t *testing.T) {
 	now := time.Date(2026, 9, 13, 23, 50, 0, 0, time.FixedZone("local", 10800))
 	d := &scopedDialogs{dialogs: dialogs{allowed: true}, scope: ui.Grant15Minutes}
 	a := confirmation.New(d, func() time.Time { return now })
-	if _, err := a.Authorize(context.Background(), "key", "", &confirmation.Destination{User: "u", HostKey: "host"}); err != nil {
+	if _, err := a.Authorize(context.Background(), "key", "", &confirmation.Destination{User: "u", HostKey: "host"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	entry := a.TemporaryDecisions()[0]
@@ -148,7 +149,7 @@ func (d *managementBlockingDialogs) ConfirmScoped(_ context.Context, r ui.Confir
 func TestTemporaryManagementWhileConfirmationOpen(t *testing.T) {
 	d := &managementBlockingDialogs{entered: make(chan struct{}), release: make(chan struct{})}
 	a := confirmation.New(d, nil)
-	if _, err := a.Authorize(context.Background(), "key", "", &confirmation.Destination{Host: "first", User: "u", HostKey: "host"}); err != nil {
+	if _, err := a.Authorize(context.Background(), "key", "", &confirmation.Destination{Host: "first", User: "u", HostKey: "host"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	entry := a.TemporaryDecisions()[0]
@@ -156,7 +157,7 @@ func TestTemporaryManagementWhileConfirmationOpen(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = a.Authorize(context.Background(), "other", "", &confirmation.Destination{Host: "blocked", User: "u", HostKey: "other-host"})
+		_, _ = a.Authorize(context.Background(), "other", "", &confirmation.Destination{Host: "blocked", User: "u", HostKey: "other-host"}, nil)
 	}()
 	<-d.entered
 	defer func() { close(d.release); wg.Wait() }()

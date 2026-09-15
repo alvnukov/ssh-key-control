@@ -4,10 +4,12 @@ import XCTest
 
 @MainActor
 final class TemporaryDecisionsTests: XCTestCase {
-    private func entry(_ id: String, allowed: Bool = true, expires: TimeInterval = 900) -> TemporaryDecision {
+    private func entry(_ id: String, allowed: Bool = true, expires: TimeInterval = 900,
+                       process: String? = nil, pid: Int32? = nil, live: Bool? = nil) -> TemporaryDecision {
         TemporaryDecision(id: id, keyFingerprint: "SHA256:key-" + id, hostFingerprint: "SHA256:server-" + id,
                           host: "router-" + id, user: "alice", allowed: allowed,
-                          expiresAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(expires)))
+                          expiresAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(expires)),
+                          process: process, processPid: pid, processLive: live)
     }
     private func descendants(_ view: NSView) -> [NSView] {
         [view] + view.subviews.flatMap { descendants($0) }
@@ -74,7 +76,41 @@ final class TemporaryDecisionsTests: XCTestCase {
     func testManagementProtocolRoundTrip() throws {
         let change = DecisionChange(action: "update", id: "opaque", endOfDay: true)
         XCTAssertEqual(try JSONDecoder().decode(DecisionChange.self, from: JSONEncoder().encode(change)), change)
-        let decision = entry("one")
-        XCTAssertEqual(try JSONDecoder().decode(TemporaryDecision.self, from: JSONEncoder().encode(decision)), decision)
+        for decision in [entry("one"), entry("two", process: "zsh", pid: 102, live: true)] {
+            XCTAssertEqual(try JSONDecoder().decode(TemporaryDecision.self, from: JSONEncoder().encode(decision)), decision)
+        }
+        // An agent that predates process anchors sends no program at all.
+        let old = #"{"id":"old","keyFingerprint":"k","hostFingerprint":"h","host":"router","user":"alice","allowed":true,"expiresAt":"2030-01-01T00:00:00Z"}"#
+        XCTAssertNil(try JSONDecoder().decode(TemporaryDecision.self, from: Data(old.utf8)).process)
+    }
+
+    func testEachRowSaysWhichProgramHoldsItAndWhetherItIsStillRunning() {
+        XCTAssertEqual(entry("a", process: "zsh", pid: 102, live: true).programLabel, "zsh [102]")
+        XCTAssertEqual(entry("b", process: "zsh", pid: 102, live: false).programLabel,
+                       "zsh [102] " + L10n.string("(ended)"))
+        // A decision nobody in particular holds says so rather than nothing.
+        XCTAssertEqual(entry("c").programLabel, L10n.string("Every program"))
+        XCTAssertFalse(entry("c").isAnchored)
+    }
+
+    func testRevokingEveryDecisionOfAProgramNamesOneRowAndOnlyWhenOneIsHeld() {
+        _ = NSApplication.shared
+        let panel = TemporaryDecisionsPanel()
+        let held = entry("held", process: "zsh", pid: 102, live: true)
+        let everyone = entry("everyone")
+        let timer = later {
+            let content = panel.window.contentView!
+            // The button is meaningless for a decision that was never kept for
+            // one program: revoking that row is what the plain button does.
+            panel.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+            XCTAssertEqual(self.button("Revoke All for Program", in: content)?.isEnabled, false)
+            panel.table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+            XCTAssertEqual(self.button("Revoke All for Program", in: content)?.isEnabled, true)
+            self.button("Revoke All for Program", in: content)?.performClick(nil)
+        }
+        XCTAssertEqual(panel.present([held, everyone], message: "", activate: false),
+                       DecisionChange(action: "revoke-process", id: held.id))
+        timer.invalidate()
+        panel.window.orderOut(nil)
     }
 }

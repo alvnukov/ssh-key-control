@@ -109,6 +109,10 @@ ssh-key-control doctor
 ssh your-host               # use one of your usual SSH destinations
 ```
 
+Keys can also be put into the agent from the menu bar (**Keys: N in agent…**)
+or with `ssh-key-control keys load`; the agent is restarted by every update,
+which empties it.
+
 When SSH first loads an encrypted key from disk, the dialog asks for its
 passphrase. The key is automatically added to the agent with confirmation
 required. Subsequent agent signatures show Allow/Deny. Return and keypad Enter
@@ -128,6 +132,21 @@ and the menu bar app with launchd. Unexpected exits restart with throttling.
 **Quit SSH Key Control** stays stopped until the next login or setup update,
 while the SSH agent remains running.
 
+- **Keys: N in agent…** (⌘K): the count is in the menu item itself, and the item
+  opens a window listing every key this Mac knows about — the private keys in
+  `~/.ssh`, the `IdentityFile` entries of `~/.ssh/config`, anything added with
+  **Add Key File…**, and keys the agent holds whose file is not on this Mac. The
+  switch on a row *is* that key's place in the agent: turning it on loads that
+  one key and turning it off takes it out again, with nothing to apply
+  afterwards. Loading runs OpenSSH's own `ssh-add` against the protected socket
+  with this app as its `SSH_ASKPASS`, so a passphrase is typed into the usual
+  dialog and can be remembered in the Keychain; each row says whether it is
+  remembered and offers **Forget**. **Load at login** marks a key to be put in
+  when the menu bar app starts, and only into an agent that is holding nothing;
+  a key marked that way with no remembered passphrase says that it will ask at
+  every login. **Unload All Keys…** empties the agent: the keys live in memory
+  only, so SSH asks for each passphrase again next time. Temporary decisions are
+  untouched.
 - **Security History…** (⌘Y): approval-gate decisions, timestamps, full signing-key
   and server-key fingerprints, SSH username, scope and expiry at the time of the
   decision. Search and filters distinguish refusals, unverified destinations and
@@ -182,6 +201,9 @@ through Recovery and retaining that result after restoring SIP.
 | `ssh-key-control install [--require force\|prefer]` | configure automatic key confirmation and launchd supervision; an installed app bundle adds menu supervision |
 | `ssh-key-control uninstall` | remove managed SSH settings and launchd jobs; restore the system agent socket |
 | `ssh-key-control status` | the agent, menu supervision, executable availability, socket and login-session variables |
+| `ssh-key-control keys load [key-file...]` | load private keys into the protected agent; without a path, every private key in `~/.ssh` the agent does not already hold |
+| `ssh-key-control keys unload [fingerprint...]` | take keys back out of the agent; without a fingerprint, all of them |
+| `ssh-key-control keys list [--json] [key-file...]` | every key this Mac has — `~/.ssh`, the `IdentityFile` entries of the SSH config, and any file named here — and which of them the agent holds |
 | `ssh-key-control doctor` | check the installation, this shell and `~/.ssh/config`; exit 1 when the installation is broken |
 | `ssh-key-control forget <account>...` | delete a remembered passphrase (the key path) or password (`user@host`) |
 | `ssh-key-control <prompt>` | answer one prompt; OpenSSH runs this, you never do |
@@ -242,13 +264,17 @@ hostbound extension without trusting an arbitrary client's forwarding flag.
 Other ordinary publickey requests remain one-shot and cannot reuse timed decisions.
 A hostname or SSH config alias never grants access to all keys of a server.
 The shared duration selector offers Once, 5 minutes, 15 minutes, the rest of the
-local calendar day, or a custom interval from 1 minute to 24 hours. Both Allow
-and Deny use that duration for the exact key/server-fingerprint/user combination.
-Choosing a duration does not submit a decision. Timed decisions live only in
-the agent's memory and vanish when it restarts. The menu's **Temporary Decisions…**
-window lists active approvals and denials, their exact identities and expiry.
-You can change the remaining interval or revoke a decision; revocation makes
-subsequent matching requests ask again. It cannot undo a signature already issued.
+local calendar day, while the calling program runs, or a custom interval from
+1 minute to 24 hours. Both Allow and Deny use that duration for the exact
+key/server-fingerprint/user combination, and both are kept for the program they
+were drawn at, as described below. Choosing a duration does not submit
+a decision. Timed decisions live only in the agent's memory and vanish when it
+restarts. The menu's **Temporary Decisions…** window lists active approvals and
+denials, their exact identities, the program each is kept for and whether that
+program is still running, and their expiry. You can change the remaining
+interval, revoke one decision, or revoke every decision held by the same program;
+revocation makes subsequent matching requests ask again. It cannot undo a
+signature already issued.
 The public agent socket can only open this window. Edits arrive over the private
 pipe of the helper launched by the daemon and cannot create a new decision.
 Forwarded or repeated session bindings are rejected; agent forwarding and
@@ -271,6 +297,50 @@ Two things this cannot cover: the first signature of a key read from disk
 before it reaches the agent, and anything a program running as your user can
 already read or change on its own (files, this configuration, the agent
 socket).
+
+## A decision belongs to the program that asked for it
+
+The dialog also shows who is asking: the chain of processes behind the request,
+from `ssh` at the bottom to the terminal or application that owns the session at
+the top, each with its process id and, where macOS can vouch for one, its signing
+team. A link macOS could not vouch for is marked; that is ordinary for a program
+that rewrites its own bundle, and worth seeing either way.
+
+A line through that chain marks how far a timed approval reaches. The agent
+proposes the nearest ancestor that outlives the request — the terminal that owns
+the session rather than the `ssh` process about to exit — and you can move the
+line further up the chain, never below it: a decision anchored below the proposed
+link would be dead before it was stored. An approval then covers that program and
+everything it starts, and no other program on the Mac inherits it. **While this
+program runs** measures the approval against that program's life; it still
+expires within a day whatever happens. The agent walks the chain again on the
+next request and matches it against what it stored, so a program that has ended,
+or a pid that has been reused by something else, simply stops matching.
+
+A refusal obeys the same line. The Deny button names the same program the Allow
+button does, and a Deny duration stops that program and everything it starts —
+not every program on the Mac. Refusing "everything" would punish your own next
+connection instead of whatever you just turned away, and do it silently, because
+a refusal already in hand shows no window at all. Within the chain a refusal
+still outranks approvals: one drawn at a window means nothing started from that
+window is signed for, whatever a program below it was granted earlier.
+
+That silence is the point. Something that asks a hundred times a second gets one
+window, and every request after it is refused from memory with no dialog and no
+notification, so a program in a loop cannot turn the refusal into a flood of
+its own. **Deny while this program runs** is the answer to exactly that: it lasts
+as long as the program you drew it at, and a fresh `ssh` started from the same
+window is still refused, because the refusal is held against the ancestor, not
+against the short-lived process that asked.
+
+When the calling program cannot be identified at all, an approval applies to
+every program, as it did before, and a refusal applies to that one request only:
+a refusal nobody could attach to a program would silence your own work afterwards
+with no window to say why, so the Deny button offers nothing but **Deny once**.
+General settings can withhold timed decisions in that case, leaving such requests
+answerable once only. The agent is never told which way that setting is set: it
+is the dialog that stops offering, so no program can weaken it by talking to the
+agent.
 
 ## `~/.ssh/config`
 

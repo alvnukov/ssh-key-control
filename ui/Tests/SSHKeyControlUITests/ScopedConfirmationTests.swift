@@ -32,11 +32,15 @@ final class ScopedConfirmationTests: XCTestCase {
         XCTAssertEqual(dispatcher.handle(Request(op: .confirm, destination: "alice@production")).scope, .denyFiveMinutes)
         dialogs.choice = Confirmation(allowed: false, scope: .denyOneHour)
         XCTAssertEqual(dispatcher.handle(Request(op: .confirm, destination: "alice@production")).scope, .denyOneHour)
+        dialogs.choice = Confirmation(allowed: false, scope: .denyProcess, boundary: 1)
+        let refusal = dispatcher.handle(Request(op: .confirm, destination: "alice@production"))
+        XCTAssertEqual(refusal.scope, .denyProcess)
+        XCTAssertEqual(refusal.boundary, 1)
         for destination in [nil, ""] as [String?] {
             XCTAssertEqual(dispatcher.handle(Request(op: .confirm, destination: destination)), .success(answer: "yes"))
         }
         XCTAssertEqual(dialogs.legacyCalls, 2)
-        XCTAssertEqual(dialogs.scopedCalls, 7) // No UI-side grant caching.
+        XCTAssertEqual(dialogs.scopedCalls, 8) // No UI-side grant caching.
         XCTAssertNil(dispatcher.handle(Request(op: .text, destination: "alice@production")).scope)
         dialogs.error = .cancelled
         XCTAssertEqual(dispatcher.handle(Request(op: .confirm, destination: "alice@production")), .failure(.cancelled))
@@ -61,14 +65,18 @@ final class ScopedConfirmationTests: XCTestCase {
     }
 
     func testDurationOnlyAnswersOnButtonAndBothDecisionsUseIt() throws {
+        // A program is named, because both answers are kept for one: a refusal
+        // with nobody to attach to lasts for this request only.
+        let chain = [ProcessLink(name: "ssh", pid: 101), ProcessLink(name: "zsh", pid: 102)]
         let choices: [(Int, GrantScope, GrantScope)] = [
             (0, .once, .once), (1, .fiveMinutes, .denyFiveMinutes),
             (2, .fifteenMinutes, .denyFifteenMinutes), (3, .day, .denyDay),
-            (4, .custom, .denyCustom)
+            (4, .process, .denyProcess), (5, .custom, .denyCustom)
         ]
         for (index, allowScope, denyScope) in choices {
             for allowed in [false, true] {
-                let panel = ConfirmationPanel(title: "Allow SSH key use?", message: "", allow: "Allow", deny: "Deny", destination: "root @ server")
+                let panel = ConfirmationPanel(title: "Allow SSH key use?", message: "", allow: "Allow", deny: "Deny",
+                                              destination: "root @ server", chain: chain, boundary: 1)
                 let result = runConfirmation(panel) {
                     panel.durationPicker.selectItem(at: index)
                     panel.durationPicker.sendAction(panel.durationPicker.action, to: panel.durationPicker.target)
@@ -80,11 +88,15 @@ final class ScopedConfirmationTests: XCTestCase {
                 }
                 XCTAssertEqual(result, allowed ? .OK : .cancel)
                 XCTAssertEqual(panel.scope, allowed ? allowScope : denyScope)
-                XCTAssertEqual(panel.durationMinutes, index == 4 ? 120 : nil)
-                let response = Response.confirmation(Confirmation(allowed: allowed, scope: panel.scope, durationMinutes: panel.durationMinutes))
+                XCTAssertEqual(panel.durationMinutes, index == 5 ? 120 : nil)
+                let response = Response.confirmation(Confirmation(allowed: allowed, scope: panel.scope,
+                                                                  durationMinutes: panel.durationMinutes,
+                                                                  boundary: panel.boundary))
                 XCTAssertEqual(response.answer, allowed ? "yes" : "no")
                 XCTAssertEqual(response.scope, !allowed && index == 0 ? nil : panel.scope)
                 XCTAssertEqual(response.durationMinutes, panel.durationMinutes)
+                // Whatever is kept is kept for the program that asked.
+                XCTAssertEqual(response.boundary, index == 0 && !allowed ? nil : 1)
             }
         }
     }
@@ -113,6 +125,8 @@ final class ScopedConfirmationTests: XCTestCase {
 private final class ScopedFakeDialogs: Dialogs {
     var choice = Confirmation(allowed: true)
     var destination: String?
+    var chain: [ProcessLink] = []
+    var boundary = 0
     var legacyCalls = 0
     var scopedCalls = 0
     var error: Failure?
@@ -120,13 +134,17 @@ private final class ScopedFakeDialogs: Dialogs {
     func secret(title: String, message: String, remember: String?) throws -> (secret: String, remember: Bool) { ("", false) }
     func text(title: String, message: String, placeholder: String) throws -> String { "yes" }
     func notify(title: String, message: String) throws {}
-    func confirm(title: String, message: String, allow: String, deny: String) throws -> Bool {
+    func confirm(title: String, message: String, allow: String, deny: String, chain: [ProcessLink]) throws -> Bool {
         legacyCalls += 1
+        self.chain = chain
         return true
     }
-    func confirmScoped(title: String, message: String, allow: String, deny: String, destination: String) throws -> Confirmation {
+    func confirmScoped(title: String, message: String, allow: String, deny: String, destination: String,
+                       chain: [ProcessLink], boundary: Int) throws -> Confirmation {
         scopedCalls += 1
         self.destination = destination
+        self.chain = chain
+        self.boundary = boundary
         if let error { throw error }
         return choice
     }

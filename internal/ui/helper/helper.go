@@ -76,6 +76,8 @@ type request struct {
 	Allow       string                 `json:"allow,omitempty"`
 	Deny        string                 `json:"deny,omitempty"`
 	Destination string                 `json:"destination,omitempty"`
+	Chain       []ui.ProcessLink       `json:"chain,omitempty"`
+	Boundary    int                    `json:"boundary,omitempty"`
 	Decisions   []ui.TemporaryDecision `json:"decisions,omitempty"`
 	Account     string                 `json:"account,omitempty"`
 	Secret      string                 `json:"secret,omitempty"`
@@ -94,6 +96,7 @@ type response struct {
 	Remember        bool               `json:"remember,omitempty"`
 	Scope           *ui.GrantScope     `json:"scope,omitempty"`
 	DurationMinutes json.RawMessage    `json:"durationMinutes,omitempty"`
+	Boundary        *int               `json:"boundary,omitempty"`
 }
 
 // Error strings the helper uses for the conditions callers distinguish.
@@ -178,6 +181,18 @@ func (c *Client) call(req request) (response, error) {
 			return response{}, errors.New("scope is only valid for an allowed confirmation")
 		}
 	}
+	if resp.Boundary != nil {
+		// The helper may report that the user widened the decision, but only
+		// to a link in the chain it was given, and never below the boundary
+		// that was proposed: anything else is a protocol fault, not a choice.
+		// Both answers draw the same line, so both may report where it landed.
+		if req.Op != "confirm" || !resp.OK || (resp.Answer != "yes" && resp.Answer != "no") {
+			return response{}, errors.New("a boundary is only valid for an answered confirmation")
+		}
+		if req.Boundary == 0 || *resp.Boundary < req.Boundary || *resp.Boundary >= len(req.Chain) {
+			return response{}, errors.New("helper returned a boundary outside the chain it was shown")
+		}
+	}
 	if resp.Change != nil && (req.Op != "manage-decisions" || !resp.OK) {
 		return response{}, errors.New("decision change is only valid for the management window")
 	}
@@ -237,14 +252,19 @@ func (c *Client) Text(_ context.Context, req ui.TextRequest) (string, error) {
 
 // Confirm implements ui.Dialogs.
 func (c *Client) Confirm(ctx context.Context, req ui.ConfirmRequest) (bool, error) {
-	req.Destination = "" // Legacy callers cannot consume timed choices.
+	// Legacy callers cannot consume timed choices, so neither the destination
+	// nor the boundary that would carry one is offered. Who is asking is still
+	// worth showing.
+	req.Destination, req.Boundary = "", 0
 	answer, err := c.ConfirmScoped(ctx, req)
 	return answer.Allowed, err
 }
 
 // ConfirmScoped implements ui.ScopedDialogs.
 func (c *Client) ConfirmScoped(_ context.Context, req ui.ConfirmRequest) (ui.Confirmation, error) {
-	resp, err := c.call(request{Op: "confirm", Title: req.Title, Message: req.Message, Allow: req.Allow, Deny: req.Deny, Destination: req.Destination})
+	resp, err := c.call(request{Op: "confirm", Title: req.Title, Message: req.Message,
+		Allow: req.Allow, Deny: req.Deny, Destination: req.Destination,
+		Chain: req.Chain, Boundary: req.Boundary})
 	if err != nil {
 		return ui.Confirmation{}, err
 	}
@@ -273,6 +293,12 @@ func (c *Client) ConfirmScoped(_ context.Context, req ui.ConfirmRequest) (ui.Con
 	}
 	if req.Destination == "" && scope != ui.GrantOnce {
 		return ui.Confirmation{}, errors.New("timed confirmation requires a destination")
+	}
+	if scope.IsProcessLifetime() && req.Boundary == 0 {
+		return ui.Confirmation{}, errors.New("a decision cannot last as long as a process nobody named")
+	}
+	if resp.Boundary != nil {
+		answer.Boundary = *resp.Boundary
 	}
 	return answer, nil
 }
