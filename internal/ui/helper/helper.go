@@ -76,6 +76,7 @@ type request struct {
 	Allow       string                 `json:"allow,omitempty"`
 	Deny        string                 `json:"deny,omitempty"`
 	Destination string                 `json:"destination,omitempty"`
+	OnceOnly    bool                   `json:"onceOnly,omitempty"`
 	Chain       []ui.ProcessLink       `json:"chain,omitempty"`
 	Boundary    int                    `json:"boundary,omitempty"`
 	Decisions   []ui.TemporaryDecision `json:"decisions,omitempty"`
@@ -263,7 +264,7 @@ func (c *Client) Confirm(ctx context.Context, req ui.ConfirmRequest) (bool, erro
 // ConfirmScoped implements ui.ScopedDialogs.
 func (c *Client) ConfirmScoped(_ context.Context, req ui.ConfirmRequest) (ui.Confirmation, error) {
 	resp, err := c.call(request{Op: "confirm", Title: req.Title, Message: req.Message,
-		Allow: req.Allow, Deny: req.Deny, Destination: req.Destination,
+		Allow: req.Allow, Deny: req.Deny, Destination: req.Destination, OnceOnly: req.OnceOnly,
 		Chain: req.Chain, Boundary: req.Boundary})
 	if err != nil {
 		return ui.Confirmation{}, err
@@ -277,6 +278,9 @@ func (c *Client) ConfirmScoped(_ context.Context, req ui.ConfirmRequest) (ui.Con
 		if scope == "" {
 			return ui.Confirmation{}, errors.New("empty confirmation scope")
 		}
+	}
+	if req.OnceOnly && scope != ui.GrantOnce {
+		return ui.Confirmation{}, errors.New("one-shot confirmation returned a timed decision")
 	}
 	answer := ui.Confirmation{Allowed: resp.Answer == "yes", Scope: scope}
 	custom := scope == ui.GrantCustom || scope == ui.DenyCustom

@@ -65,6 +65,8 @@ type ConfirmRequest struct {
 	Deny    string
 	// Destination enables timed choices only when nonempty.
 	Destination string
+	// OnceOnly retains a verified destination while disabling all timed choices.
+	OnceOnly bool
 	// Chain is the caller's process ancestry, nearest first, and Boundary
 	// indexes the link a timed decision would attach to. The user may move
 	// the boundary further up the chain, never below it: a decision anchored

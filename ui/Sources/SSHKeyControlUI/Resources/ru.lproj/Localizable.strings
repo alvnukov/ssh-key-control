@@ -329,3 +329,7 @@
 "Remove from list" = "Убрать из списка";
 "Could not forget the saved password" = "Не удалось забыть сохранённый пароль";
 "%@ is not a private key file" = "%@ — не файл закрытого ключа";
+
+"Forwarded SSH request. Allow or deny this signature once; timed decisions are unavailable." = "Запрос через перенаправленный SSH-агент. Разрешение или отказ действуют на одну подпись; временные решения недоступны.";
+"The remote process is not attested. The local SSH process owns only the forwarding tunnel." = "Удалённый процесс не подтверждён. Локальный процесс SSH обслуживает только туннель перенаправления.";
+"Verified forwarding-hop fingerprints: %@" = "Отпечатки узлов проверенных SSH-сеансов: %@";

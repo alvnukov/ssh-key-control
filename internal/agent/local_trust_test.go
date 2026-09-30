@@ -106,29 +106,50 @@ func TestLocalTrustLossDuringApprovalDeniesSignature(t *testing.T) {
 	}
 }
 
-func TestLocalTrustDoesNotRescueForwardedOrRepeatedBinding(t *testing.T) {
-	for _, forwarding := range []byte{0, 1} {
-		called := false
-		c, key, host, auth := localFixture(t, func() bool { return true }, func(context.Context, SigningRequest) (bool, error) {
-			called = true
-			return true, nil
-		})
-		signature, err := host.Sign(rand.Reader, auth.Session)
+func TestLocalTrustDoesNotRescueRepeatedBinding(t *testing.T) {
+	called := false
+	c, key, host, auth := localFixture(t, func() bool { return true }, func(context.Context, SigningRequest) (bool, error) { called = true; return true, nil })
+	signature, err := host.Sign(rand.Reader, auth.Session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bind := ssh.Marshal(struct {
+		Host, Session, Signature []byte
+		Forward                  byte
+	}{host.PublicKey().Marshal(), auth.Session, ssh.Marshal(signature), 0})
+	if _, err := c.Extension("session-bind@openssh.com", bind); err == nil {
+		t.Fatal("repeated binding accepted")
+	}
+	if signature, err := c.Sign(key.PublicKey(), ssh.Marshal(auth)); err == nil || signature != nil || called {
+		t.Fatal("trusted local client bypassed binding rejection")
+	}
+}
+
+func TestForwardedOrdinaryAuthCannotUseLocalTunnelTrust(t *testing.T) {
+	called := false
+	c, key, host, auth := localFixture(t, func() bool { return true }, func(context.Context, SigningRequest) (bool, error) { called = true; return true, nil })
+	// Start a new connection, with the same live trusted-local callback.
+	c.binding = nil
+	c.bindings = nil
+	c.bindingBytes = 0
+	for _, forward := range []byte{1, 0} {
+		session := []byte{forward + 1}
+		signature, err := host.Sign(rand.Reader, session)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if forwarding == 1 {
-			c.binding = nil
-		} // first binding claims forwarding
 		bind := ssh.Marshal(struct {
 			Host, Session, Signature []byte
 			Forward                  byte
-		}{host.PublicKey().Marshal(), auth.Session, ssh.Marshal(signature), forwarding})
-		if _, err := c.Extension("session-bind@openssh.com", bind); err == nil {
-			t.Fatal("forwarded/repeated binding accepted")
+		}{host.PublicKey().Marshal(), session, ssh.Marshal(signature), forward})
+		if _, err := c.Extension("session-bind@openssh.com", bind); err != nil {
+			t.Fatal(err)
 		}
-		if signature, err := c.Sign(key.PublicKey(), ssh.Marshal(auth)); err == nil || signature != nil || called {
-			t.Fatal("trusted local client bypassed binding rejection")
+		if forward == 0 {
+			auth.Session = session
 		}
+	}
+	if sig, err := c.Sign(key.PublicKey(), ssh.Marshal(auth)); err == nil || sig != nil || called {
+		t.Fatal("forwarded ordinary publickey inherited local SSH trust")
 	}
 }

@@ -579,6 +579,9 @@ func (a *App) agent(ctx context.Context, args []string) error {
 				User: req.User, HostKey: req.HostKey,
 			}
 		}
+		if req.Forwarded {
+			return authorizer.AuthorizeForwarded(ctx, req.Fingerprint, req.Comment, destination, req.ForwardedHosts)
+		}
 		return authorizer.Authorize(ctx, req.Fingerprint, req.Comment, destination, req.Caller)
 	}, management.open)
 	return agent.Run(ctx, agent.Runtime{

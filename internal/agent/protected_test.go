@@ -310,12 +310,11 @@ func TestProtectedInvalidBindingTaintsConnection(t *testing.T) {
 		{"empty session", protectedBinding(t, host, nil, false), false},
 		{"oversized session", protectedBinding(t, host, make([]byte, 129), false), false},
 		{"oversized binding", make([]byte, 65<<10), false},
-		{"forwarded", protectedBinding(t, host, session, true), false},
 		{"invalid boolean", badBoolean, false},
 		{"duplicate", valid, true},
 		{"conflicting host", protectedBinding(t, otherHost, session, false), true},
 		{"conflicting session", protectedBinding(t, host, []byte("second session"), false), true},
-		{"forwarding chain", protectedBinding(t, otherHost, []byte("next hop"), true), true},
+		{"forwarding after terminal", protectedBinding(t, otherHost, []byte("next hop"), true), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := &protectedRecorder{allow: true}

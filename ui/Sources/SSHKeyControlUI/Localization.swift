@@ -29,7 +29,7 @@ enum L10n {
     static func message(_ text: String, preservingFirstLine: Bool = false, bundle: Bundle = localizedResources) -> String {
         text.components(separatedBy: "\n").enumerated().map { index, line in
             if preservingFirstLine && index == 0 { return line }
-            for prefix in ["Key: ", "Server identity: ", "Account: "] {
+            for prefix in ["Key: ", "Server identity: ", "Account: ", "Verified forwarding-hop fingerprints: "] {
                 if line.hasPrefix(prefix) {
                     return format(prefix + "%@", String(line.dropFirst(prefix.count)), bundle: bundle)
                 }

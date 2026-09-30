@@ -56,6 +56,10 @@ func fakeHelper() {
 		case "text":
 			resp["answer"] = "yes"
 		case "confirm":
+			if req["title"] == "forwarded once" && (req["onceOnly"] != true || req["destination"] != "alice@production") {
+				resp = map[string]any{"ok": false, "error": "missing verified one-shot destination"}
+				break
+			}
 			if req["title"] == "deny me" {
 				resp["answer"] = "no"
 			} else {

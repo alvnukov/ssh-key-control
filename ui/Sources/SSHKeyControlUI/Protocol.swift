@@ -29,6 +29,7 @@ public struct Request: Codable, Equatable, Sendable {
     public var account: String?
     public var secret: String?
     public var destination: String?
+    public var onceOnly: Bool?
     public var decisions: [TemporaryDecision]?
     public var activate: Bool?
     /// The processes that led to this request, nearest caller first, and the
@@ -42,7 +43,7 @@ public struct Request: Codable, Equatable, Sendable {
         placeholder: String? = nil, allow: String? = nil, deny: String? = nil,
         account: String? = nil, secret: String? = nil, destination: String? = nil,
         decisions: [TemporaryDecision]? = nil, activate: Bool? = nil,
-        chain: [ProcessLink]? = nil, boundary: Int? = nil
+        chain: [ProcessLink]? = nil, boundary: Int? = nil, onceOnly: Bool? = nil
     ) {
         self.op = op
         self.title = title
@@ -54,6 +55,7 @@ public struct Request: Codable, Equatable, Sendable {
         self.account = account
         self.secret = secret
         self.destination = destination
+        self.onceOnly = onceOnly
         self.decisions = decisions
         self.activate = activate
         self.chain = chain

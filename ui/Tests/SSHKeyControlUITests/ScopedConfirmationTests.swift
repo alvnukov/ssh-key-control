@@ -4,6 +4,41 @@ import XCTest
 
 @MainActor
 final class ScopedConfirmationTests: XCTestCase {
+    func testLegacyDialogsCannotDowngradeVerifiedOnceOnlyDestination() {
+        let dialogs = FakeDialogs()
+        let dispatcher = Dispatcher(dialogs: dialogs, store: FakeStore())
+        let response = dispatcher.handle(Request(op: .confirm, destination: "alice @ terminal", onceOnly: true))
+        XCTAssertFalse(response.ok)
+        XCTAssertTrue(dialogs.calls.isEmpty)
+    }
+
+    func testVerifiedOnceOnlyDispatchRetainsDestination() throws {
+        let request = try Wire.decode(Data(#"{"op":"confirm","destination":"alice @ terminal","onceOnly":true}"#.utf8))
+        let dialogs = ScopedFakeDialogs()
+        dialogs.choice = Confirmation(allowed: true, scope: .day)
+        let dispatcher = Dispatcher(dialogs: dialogs, store: FakeStore())
+        let response = dispatcher.handle(request)
+        XCTAssertEqual(response.scope, .once)
+        XCTAssertEqual(response.answer, "yes")
+        XCTAssertEqual(dialogs.destination, "alice @ terminal")
+        XCTAssertEqual(dialogs.onceCalls, 1)
+        XCTAssertEqual(dialogs.scopedCalls, 0)
+    }
+
+    func testVerifiedOnceOnlyPanelHasNoTimedOrUnverifiedChoices() {
+        let panel = ConfirmationPanel(title: "Allow SSH key use?", message: "key\nKey: SHA256:key\nServer identity: SHA256:host",
+                                      allow: "Allow", deny: "Deny", destination: "alice @ terminal", onceOnly: true)
+        XCTAssertEqual(panel.durationPicker.itemArray.compactMap { $0.representedObject as? String }, ["once"])
+        XCTAssertFalse(panel.durationPicker.isEnabled)
+        func labels(_ view: NSView) -> [String] {
+            (view as? NSTextField).map { [$0.stringValue] } ?? view.subviews.flatMap(labels)
+        }
+        let content = labels(panel.contentView!).joined(separator: "\n")
+        XCTAssertTrue(content.contains("alice @ terminal"))
+        XCTAssertFalse(content.contains(L10n.string("Server not verified")))
+        XCTAssertFalse(content.contains(L10n.string("The program that asked could not be identified, and this Mac only grants timed decisions to a named program.")))
+    }
+
     func testDestinationAndLegacyDialogFallback() throws {
         let request = try Wire.decode(Data(#"{"op":"confirm","destination":"alice@production"}"#.utf8))
         XCTAssertEqual(request.destination, "alice@production")
@@ -129,6 +164,7 @@ private final class ScopedFakeDialogs: Dialogs {
     var boundary = 0
     var legacyCalls = 0
     var scopedCalls = 0
+    var onceCalls = 0
     var error: Failure?
 
     func secret(title: String, message: String, remember: String?) throws -> (secret: String, remember: Bool) { ("", false) }
@@ -138,6 +174,12 @@ private final class ScopedFakeDialogs: Dialogs {
         legacyCalls += 1
         self.chain = chain
         return true
+    }
+    func confirmOnce(title: String, message: String, allow: String, deny: String, destination: String) throws -> Bool {
+        onceCalls += 1
+        self.destination = destination
+        if let error { throw error }
+        return choice.allowed
     }
     func confirmScoped(title: String, message: String, allow: String, deny: String, destination: String,
                        chain: [ProcessLink], boundary: Int) throws -> Confirmation {

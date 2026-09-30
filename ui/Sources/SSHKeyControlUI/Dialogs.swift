@@ -88,11 +88,22 @@ public final class AppKitDialogs: Dialogs {
 
     public func confirmScoped(title: String, message: String, allow: String, deny: String, destination: String,
                               chain: [ProcessLink], boundary: Int) throws -> Confirmation {
+        try presentConfirmation(title: title, message: message, allow: allow, deny: deny, destination: destination,
+                                chain: chain, boundary: boundary, onceOnly: false)
+    }
+
+    public func confirmOnce(title: String, message: String, allow: String, deny: String, destination: String) throws -> Bool {
+        try presentConfirmation(title: title, message: message, allow: allow, deny: deny, destination: destination,
+                                chain: [], boundary: 0, onceOnly: true).allowed
+    }
+
+    private func presentConfirmation(title: String, message: String, allow: String, deny: String, destination: String,
+                                     chain: [ProcessLink], boundary: Int, onceOnly: Bool) throws -> Confirmation {
         // A fresh panel for every request: grants are never remembered by the UI.
         let enterAction = ConfirmationEnterAction(rawValue: defaults.string(forKey: Self.enterActionKey) ?? "") ?? .deny
         let panel = ConfirmationPanel(title: title, message: message, allow: allow, deny: deny,
                                       destination: destination, chain: chain, boundary: boundary,
-                                      unanchoredDurations: unanchoredDurations, enterAction: enterAction)
+                                      unanchoredDurations: unanchoredDurations, enterAction: enterAction, onceOnly: onceOnly)
         panel.center()
         SSHKeyControlActivateApp()
         panel.makeKeyAndOrderFront(nil)
@@ -210,14 +221,14 @@ final class ConfirmationPanel: NSPanel {
 
     init(title: String, message: String, allow: String, deny: String, destination: String,
          chain: [ProcessLink] = [], boundary: Int = 0, unanchoredDurations: Bool = true,
-         enterAction: ConfirmationEnterAction = .deny) {
+         enterAction: ConfirmationEnterAction = .deny, onceOnly: Bool = false) {
         self.enterAction = enterAction
         let chainView = chain.isEmpty ? nil : ProcessChainView(links: chain, boundary: boundary)
         self.chainView = chainView
         let anchored = (chainView?.proposed ?? 0) > 0
         // A request whose program could not be named can still be granted for
         // a while, unless this Mac has been told to require one.
-        timedChoicesAllowed = !destination.isEmpty && (anchored || unanchoredDurations)
+        timedChoicesAllowed = !onceOnly && !destination.isEmpty && (anchored || unanchoredDurations)
         super.init(contentRect: NSRect(x: 0, y: 0, width: 560, height: 180),
                    styleMask: [.titled], backing: .buffered, defer: false)
         self.title = "SSH Key Control"
@@ -262,7 +273,7 @@ final class ConfirmationPanel: NSPanel {
             views.append(caption)
             views.append(chainContainer(chainView))
         }
-        if !destination.isEmpty && !anchored {
+        if !onceOnly && !destination.isEmpty && !anchored {
             views.append(Self.label(L10n.string(timedChoicesAllowed
                 ? "The program that asked could not be identified, so a timed approval would apply to every program, and a refusal applies to this request only."
                 : "The program that asked could not be identified, and this Mac only grants timed decisions to a named program.")))

@@ -277,8 +277,14 @@ revocation makes subsequent matching requests ask again. It cannot undo a
 signature already issued.
 The public agent socket can only open this window. Edits arrive over the private
 pipe of the helper launched by the daemon and cannot create a new decision.
-Forwarded or repeated session bindings are rejected; agent forwarding and
-multi-hop binding chains are currently unsupported.
+Agent forwarding accepts a verified chain of at most 16 session bindings, with
+at most 64 KiB of binding data in total. Forwarded signatures require terminal
+hostbound authentication and a new, one-signature approval every time; direct
+connection decisions cannot authorize them. The dialog shows the final server
+and forwarding-hop fingerprints; the remote process is not attested. Servers
+without hostbound authentication remain unsupported through forwarding.
+Malformed, repeated or post-terminal bindings permanently forbid signing on
+that agent connection.
 
 Disconnected clients cancel their pending dialog and queued approval; a late
 answer cannot create a grant. The service accepts at most 64 concurrent

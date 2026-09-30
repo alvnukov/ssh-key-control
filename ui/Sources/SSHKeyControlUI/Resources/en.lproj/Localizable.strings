@@ -329,3 +329,7 @@
 "Remove from list" = "Remove from list";
 "Could not forget the saved password" = "Could not forget the saved password";
 "%@ is not a private key file" = "%@ is not a private key file";
+
+"Forwarded SSH request. Allow or deny this signature once; timed decisions are unavailable." = "Forwarded SSH request. Allow or deny this signature once; timed decisions are unavailable.";
+"The remote process is not attested. The local SSH process owns only the forwarding tunnel." = "The remote process is not attested. The local SSH process owns only the forwarding tunnel.";
+"Verified forwarding-hop fingerprints: %@" = "Verified forwarding-hop fingerprints: %@";

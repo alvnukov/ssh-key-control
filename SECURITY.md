@@ -12,7 +12,12 @@ older development snapshots are unsupported.
 
 The agent gates signing operations. Persistent decisions require the exact
 signing-key fingerprint, verified host-key fingerprint and SSH username.
-Unverified destinations receive at most one signature per approval.
+Unverified destinations receive at most one signature per approval. Forwarded
+requests require a bounded, cryptographically verified session-binding chain and
+matching terminal hostbound authentication. Each forwarded signature receives
+its own explicit approval and cannot reuse or create temporary decisions.
+Forwarding-hop fingerprints identify SSH sessions, not the remote process or
+proof that a host is trusted; the local socket peer is only the forwarding tunnel.
 
 Disabling Apple's launchd service does not prevent arbitrary processes from
 starting another agent or reading accessible private keys. Local history is

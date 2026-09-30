@@ -23,6 +23,10 @@ type SigningRequest struct {
 	// the moment it is asked, and the callback asks more than once. It is nil
 	// when there is no attested peer to read.
 	Caller func() proc.Chain
+	// ForwardedHosts are the verified forwarding-hop fingerprints, in order.
+	// Nonempty requests require hostbound authentication and one-shot approval.
+	ForwardedHosts []string
+	Forwarded      bool
 }
 
 // Protected owns an in-memory keyring with no ungated signing interface.
@@ -76,19 +80,23 @@ type protectedConnection struct {
 	owner        *Protected
 	ctx          context.Context
 	binding      *protectedBinding
+	bindings     []*protectedBinding
+	bindingBytes int
 	tainted      bool
 	trustedLocal func() bool
 	caller       func() proc.Chain
 }
 
 type protectedBinding struct {
-	hostKey   ssh.PublicKey
-	sessionID []byte
+	hostKey    ssh.PublicKey
+	sessionID  []byte
+	forwarding bool
 }
 
 // ServeAgent caps wire packets at 16 MiB. Apply a tighter bound before parsing
-// destination evidence, and retain at most one bounded session ID and host key.
+// destination evidence, and bound both chain length and aggregate retained data.
 const maxProtectedContextBytes = 64 << 10
+const maxProtectedBindings = 16
 
 var _ sshagent.ExtendedAgent = (*protectedConnection)(nil)
 
@@ -138,6 +146,19 @@ func (c *protectedConnection) SignWithFlags(key ssh.PublicKey, data []byte, flag
 		req := SigningRequest{Fingerprint: ssh.FingerprintSHA256(actual), Comment: candidate.Comment, Caller: c.caller}
 		var localOnly bool
 		req.User, req.HostKey, localOnly = c.destination(actual, data)
+		for _, binding := range c.bindings {
+			if binding.forwarding {
+				req.ForwardedHosts = append(req.ForwardedHosts, ssh.FingerprintSHA256(binding.hostKey))
+			}
+		}
+		req.Forwarded = len(req.ForwardedHosts) != 0
+		if req.Forwarded {
+			if c.binding.forwarding || req.User == "" || req.HostKey == "" {
+				return nil, errors.New("agent: forwarded signing requires terminal hostbound authentication")
+			}
+			// The local socket peer is the forwarding tunnel, not the remote caller.
+			req.Caller = nil
+		}
 		allowed, err := c.owner.confirm(c.ctx, req)
 		if err != nil {
 			return nil, err
@@ -159,9 +180,9 @@ func (c *protectedConnection) SignWithFlags(key ssh.PublicKey, data []byte, flag
 	return nil, errors.New("agent: key unavailable")
 }
 
-// Only a single direct, nonforwarded binding is supported. Any malformed,
-// forwarded or additional binding (even a duplicate) permanently forbids
-// signing on this connection. We deliberately do not interpret binding chains.
+// Bindings form a bounded sequence of forwarding hops followed by one terminal
+// authentication binding. Invalid or repeated bindings permanently forbid
+// signing on this connection; a terminal binding cannot be extended.
 func (c *protectedConnection) Extension(name string, contents []byte) ([]byte, error) {
 	if name == ManageDecisionsExtension {
 		if len(contents) != 0 || c.tainted || c.binding != nil || c.owner.openManagement == nil {
@@ -172,12 +193,12 @@ func (c *protectedConnection) Extension(name string, contents []byte) ([]byte, e
 	if name != "session-bind@openssh.com" {
 		return nil, sshagent.ErrExtensionUnsupported
 	}
-	if c.tainted || c.binding != nil {
+	if c.tainted || (c.binding != nil && !c.binding.forwarding) {
 		c.tainted = true
 		return nil, errors.New("agent: repeated session binding")
 	}
 	c.tainted = true // Fail closed even if a later valid binding is attempted.
-	if len(contents) > maxProtectedContextBytes {
+	if len(c.bindings) >= maxProtectedBindings || len(contents) > maxProtectedContextBytes-c.bindingBytes {
 		return nil, errors.New("agent: session binding too large")
 	}
 	var wire struct {
@@ -187,8 +208,13 @@ func (c *protectedConnection) Extension(name string, contents []byte) ([]byte, e
 	if err := ssh.Unmarshal(contents, &wire); err != nil {
 		return nil, err
 	}
-	if wire.Forwarding != 0 || len(wire.SessionID) == 0 || len(wire.SessionID) > 128 {
+	if wire.Forwarding > 1 || len(wire.SessionID) == 0 || len(wire.SessionID) > 128 {
 		return nil, errors.New("agent: unsupported session binding")
+	}
+	for _, binding := range c.bindings {
+		if bytes.Equal(wire.SessionID, binding.sessionID) {
+			return nil, errors.New("agent: repeated session ID")
+		}
 	}
 	host, err := ssh.ParsePublicKey(wire.HostKey)
 	if err != nil {
@@ -201,16 +227,18 @@ func (c *protectedConnection) Extension(name string, contents []byte) ([]byte, e
 	if err := host.Verify(wire.SessionID, &sig); err != nil {
 		return nil, err
 	}
-	c.binding = &protectedBinding{hostKey: host, sessionID: bytes.Clone(wire.SessionID)}
+	c.binding = &protectedBinding{hostKey: host, sessionID: bytes.Clone(wire.SessionID), forwarding: wire.Forwarding == 1}
+	c.bindings = append(c.bindings, c.binding)
+	c.bindingBytes += len(contents)
 	c.tainted = false
 	return nil, nil
 }
 
 // destination extracts authority only from a complete, matching userauth
-// payload. All other data stays generic; a previous scoped request grants no
-// authority to a subsequent request on the same connection.
+// payload. Invalid data has no destination authority; SignWithFlags rejects it
+// outright on forwarded connections rather than offering generic confirmation.
 func (c *protectedConnection) destination(key ssh.PublicKey, data []byte) (string, string, bool) {
-	if c.binding == nil || len(data) > maxProtectedContextBytes {
+	if c.binding == nil || c.binding.forwarding || len(data) > maxProtectedContextBytes {
 		return "", "", false
 	}
 	var auth struct {
@@ -243,7 +271,7 @@ func (c *protectedConnection) destination(key ssh.PublicKey, data []byte) (strin
 			return "", "", false
 		}
 	case "publickey":
-		if len(auth.Rest) != 0 || c.trustedLocal == nil || !c.trustedLocal() {
+		if len(c.bindings) > 1 || len(auth.Rest) != 0 || c.trustedLocal == nil || !c.trustedLocal() {
 			return "", "", false
 		}
 		return auth.User, ssh.FingerprintSHA256(c.binding.hostKey), true

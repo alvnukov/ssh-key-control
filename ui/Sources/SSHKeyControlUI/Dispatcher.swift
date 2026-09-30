@@ -10,6 +10,7 @@ public protocol Dialogs {
     /// Asks a yes/no question; true means allowed. `chain` is who is asking,
     /// which is worth showing even when nothing but this one answer is at stake.
     func confirm(title: String, message: String, allow: String, deny: String, chain: [ProcessLink]) throws -> Bool
+    func confirmOnce(title: String, message: String, allow: String, deny: String, destination: String) throws -> Bool
     func confirmScoped(title: String, message: String, allow: String, deny: String, destination: String,
                        chain: [ProcessLink], boundary: Int) throws -> Confirmation
     func manageDecisions(_ decisions: [TemporaryDecision], message: String, activate: Bool) throws -> DecisionChange
@@ -18,6 +19,9 @@ public protocol Dialogs {
 }
 
 public extension Dialogs {
+    func confirmOnce(title: String, message: String, allow: String, deny: String, destination: String) throws -> Bool {
+        throw Failure.other("Verified one-shot confirmation is unavailable.")
+    }
     func manageDecisions(_ decisions: [TemporaryDecision], message: String, activate: Bool) throws -> DecisionChange {
         throw Failure.other("Temporary decision management is unavailable.")
     }
@@ -65,6 +69,12 @@ public struct Dispatcher {
             return .success(answer: answer)
         case .confirm:
             let chain = req.chain ?? []
+            if req.onceOnly == true {
+                let allowed = try dialogs.confirmOnce(
+                    title: req.title ?? "", message: req.message ?? "",
+                    allow: req.allow ?? "Allow", deny: req.deny ?? "Deny", destination: req.destination ?? "")
+                return .confirmation(Confirmation(allowed: allowed))
+            }
             if let destination = req.destination, !destination.isEmpty {
                 let choice = try dialogs.confirmScoped(
                     title: req.title ?? "", message: req.message ?? "",

@@ -47,3 +47,17 @@ func TestUnknownDestinationAlwaysAsksOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestVerifiedOneShotDestinationOnHelperWire(t *testing.T) {
+	c := start(t)
+	answer, err := c.ConfirmScoped(context.Background(), ui.ConfirmRequest{Title: "forwarded once", Destination: "alice@production", OnceOnly: true})
+	if err != nil || answer != (ui.Confirmation{Allowed: true, Scope: ui.GrantOnce}) {
+		t.Fatalf("verified one-shot wire: %+v %v", answer, err)
+	}
+	for _, scope := range []string{"5m", "day", "process", "deny5m"} {
+		answer, err := c.ConfirmScoped(context.Background(), ui.ConfirmRequest{Title: "forced scope", Message: scope, Destination: "alice@production", OnceOnly: true})
+		if err == nil || answer.Allowed {
+			t.Fatalf("legacy timed answer accepted for once-only: %s %+v %v", scope, answer, err)
+		}
+	}
+}
