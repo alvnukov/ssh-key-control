@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"encoding/pem"
 	"fmt"
 	"net"
@@ -172,7 +173,7 @@ func TestLocalOpenSSHTwoHopForwardingHarness(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
-	_, keyPrivate, err := ed25519.GenerateKey(rand.Reader)
+	keyPrivate, err := rsa.GenerateKey(rand.Reader, 3072)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +212,7 @@ func TestLocalOpenSSHTwoHopForwardingHarness(t *testing.T) {
 	}
 	config := filepath.Join(dir, "ssh_config")
 	configText := fmt.Sprintf("Host hop-one\n HostName 127.0.0.1\n Port %d\n User %s\n IdentityFile %s\n IdentitiesOnly yes\n PubkeyAuthentication host-bound\n PreferredAuthentications publickey\n StrictHostKeyChecking yes\n UserKnownHostsFile %s\n GlobalKnownHostsFile /dev/null\n UpdateHostKeys no\n ControlMaster no\n ControlPath none\n ControlPersist no\n ProxyJump none\n ProxyCommand none\n\n"+
-		"Host hop-two\n HostName 127.0.0.1\n Port %d\n User %s\n IdentityFile %s\n IdentitiesOnly yes\n PubkeyAuthentication host-bound\n PreferredAuthentications publickey\n StrictHostKeyChecking yes\n UserKnownHostsFile %s\n GlobalKnownHostsFile /dev/null\n UpdateHostKeys no\n ControlMaster no\n ControlPath none\n ControlPersist no\n ProxyJump none\n ProxyCommand none\n",
+		"Host hop-two\n HostName 127.0.0.1\n Port %d\n User %s\n IdentityFile %s\n IdentitiesOnly yes\n PubkeyAuthentication host-bound\n PubkeyAcceptedAlgorithms rsa-sha2-512\n PreferredAuthentications publickey\n StrictHostKeyChecking yes\n UserKnownHostsFile %s\n GlobalKnownHostsFile /dev/null\n UpdateHostKeys no\n ControlMaster no\n ControlPath none\n ControlPersist no\n ProxyJump none\n ProxyCommand none\n",
 		firstPort, user, publicPath, knownHosts, secondPort, user, publicPath, knownHosts)
 	if err := writeHarnessFile(config, []byte(configText), 0600); err != nil {
 		t.Fatal(err)
@@ -277,7 +278,7 @@ func TestLocalOpenSSHTwoHopForwardingHarness(t *testing.T) {
 		t.Fatalf("unbound second hop reached the approval UI: got %d prompts, want 2", len(prompts))
 	}
 
-	remoteBound := sshPrefix + " hop-two printf FORWARDED_HOP_OK"
+	remoteBound := sshPrefix + " -vvv hop-two printf FORWARDED_HOP_OK"
 	secondCtx, cancelSecond := context.WithTimeout(context.Background(), 30*time.Second)
 	second := exec.CommandContext(secondCtx, sshPath, "-F", config, "-A", "hop-one", remoteBound)
 	second.Env = localEnv
@@ -288,6 +289,9 @@ func TestLocalOpenSSHTwoHopForwardingHarness(t *testing.T) {
 	}
 	if !strings.Contains(string(secondOutput), "FORWARDED_HOP_OK") {
 		t.Fatalf("second-hop SSH did not return success marker: %s", secondOutput)
+	}
+	if !strings.Contains(string(secondOutput), "signing using rsa-sha2-512") {
+		t.Fatalf("SSH did not use the required RSA SHA-2-512 signature: %s", secondOutput)
 	}
 	requests := dialogs.snapshot()
 	if len(requests) != 3 {
