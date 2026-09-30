@@ -84,7 +84,11 @@ func TestInstall(t *testing.T) {
 		}
 	}
 	joined := strings.Join(ld.Calls, "\n")
-	if !strings.Contains(joined, "bootout gui/501/io.github.alvnukov.ssh-key-control\nbootstrap gui/501 "+wantPath) {
+	bootout := "bootout gui/501/" + agent.Label
+	removed := "print gui/501/" + agent.Label
+	bootstrap := "bootstrap gui/501 " + wantPath
+	if !strings.Contains(joined, bootout) || !strings.Contains(joined, removed) || !strings.Contains(joined, bootstrap) ||
+		strings.Index(joined, bootout) > strings.Index(joined, removed) || strings.Index(joined, removed) > strings.Index(joined, bootstrap) {
 		t.Errorf("calls:\n%s", joined)
 	}
 }

@@ -154,10 +154,26 @@ func (i *Installer) Install(ctx context.Context, exe, require string) (*Result, 
 	if err := i.Launchctl.Bootout(ctx, agent.Label); err != nil && !errors.Is(err, launchd.ErrNotLoaded) {
 		return nil, fmt.Errorf("unloading the previous agent: %w", err)
 	}
+	// Bootout may return while launchd still retains the old label. Do not
+	// bootstrap either replacement until both previous jobs are actually gone.
+	if err := i.waitUnloaded(ctx, agent.Label); err != nil {
+		return nil, fmt.Errorf("waiting for the previous agent to unload: %w", err)
+	}
+	if companion != "" {
+		if err := i.waitUnloaded(ctx, CompanionLabel); err != nil {
+			return nil, fmt.Errorf("waiting for the previous menu bar application to unload: %w", err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := i.Launchctl.Bootstrap(ctx, path); err != nil {
 		return nil, fmt.Errorf("loading %s: %w", path, err)
 	}
 	if companion != "" {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if err := i.Launchctl.Bootstrap(ctx, i.CompanionPlistPath()); err != nil {
 			return nil, fmt.Errorf("loading menu bar application: %w", err)
 		}
@@ -208,6 +224,31 @@ func (i *Installer) companionExecutable(exe string) (string, error) {
 		return "", fmt.Errorf("menu bar executable %s is unavailable: %w", companion, err)
 	}
 	return companion, nil
+}
+
+// waitUnloaded confirms removal of a label, rather than just process exit.
+// Bootout's EINPROGRESS is not evidence that a replacement can be bootstrapped.
+func (i *Installer) waitUnloaded(ctx context.Context, label string) error {
+	for attempt := 0; attempt < 25; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		_, err := i.Launchctl.Print(ctx, label)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(err, launchd.ErrNotLoaded) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		i.Sleep(200 * time.Millisecond)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return fmt.Errorf("%s did not unload", label)
 }
 
 // waitRunning polls launchd until the service has a process.
